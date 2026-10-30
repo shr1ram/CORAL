@@ -1,0 +1,48 @@
+task:
+  name: "ALE-Bench AHC039: Purse Seine Fishing"
+  description: |
+    Solve AtCoder Heuristic Contest 039 (from ALE-Bench). The full problem statement is in
+    `statement.md`: read it carefully, including the scoring rule and the output format.
+
+    Write a C++20 solution in `solution.cpp`. It reads one test case from stdin and writes
+    the answer to stdout. It is compiled and judged like AtCoder (g++, C++20, -O2) on the
+    problem's 50 public test cases, with a 2 s time limit and 1 GiB memory limit per case.
+
+    Your score is the mean absolute score over the 50 public cases (higher is better).
+    A compile error, wrong answer or timeout scores 0 on that case.
+  tips: |
+    - Five sample inputs are in `inputs/`. Compile locally with `g++ -std=c++20 -O2` (or
+      clang++) and test against them before running `coral eval`.
+    - Heuristic contests reward search: greedy construction, then local search or
+      simulated annealing within the time limit. Stop the search at about 1.8 s.
+    - Validate your polygon carefully (edge count, axis-aligned edges, perimeter limit,
+      no self-intersection); an invalid answer scores 0 for that case.
+    - The eval feedback lists verdicts per case and the first failure's message.
+
+grader:
+  entrypoint: "ale_bench_grader.grader:Grader"
+  setup:
+    - "uv pip install -e ./grader"
+    - "uv pip install -e /Users/shriramruppa/Side/autoresearch/ALE-Bench"
+  timeout: 600
+  direction: maximize
+  args:
+    problem_id: ahc039
+    lite_version: false
+    num_workers: 4
+    code_language: cpp20
+    solution_file: solution.cpp
+
+agents:
+  count: 4
+  runtime: pi
+  model: local/flint
+  research: false
+  mode: compete
+
+run:
+  session: local
+
+workspace:
+  results_dir: "./results"
+  repo_path: "./examples/ale_bench_ahc039/seed"
