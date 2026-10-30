@@ -47,14 +47,22 @@ MINIMAL_PROMPTS: dict[str, str] = {
 }
 
 
+_LINT_WITH_SUBAGENTS = """## Tidy the notes
+
+Brief a librarian subagent: `coral subagent run --type librarian "Merge duplicate notes, fix stale
+or contradictory ones, and regenerate {shared_dir}/notes/index.md"`. Then keep improving.
+"""
+
+
 def default_prompt(name: str, instructions: str = "minimal", subagents: bool = False) -> str:
     """Built-in prompt for a heartbeat action under the given instruction set.
 
-    The full lint_wiki prompt spawns the librarian subagent; without subagents
-    it falls back to the minimal one, which uses the organize-files skill.
+    lint_wiki never uses Claude Code's native subagent spawning: with
+    agents.subagents it briefs a librarian via `coral subagent`, otherwise it
+    uses the organize-files skill.
     """
-    if name == "lint_wiki" and not subagents:
-        return MINIMAL_PROMPTS[name]
+    if name == "lint_wiki":
+        return _LINT_WITH_SUBAGENTS if subagents else MINIMAL_PROMPTS[name]
     prompts = MINIMAL_PROMPTS if instructions == "minimal" else DEFAULT_PROMPTS
     return prompts.get(name, "")
 

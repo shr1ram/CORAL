@@ -172,6 +172,7 @@ class AgentManager:
         # Sandbox provider (agents.sandbox.provider, e.g. srt). Instantiated
         # in _start_sandbox_if_enabled; lives and dies with the manager.
         self._sandbox: Any | None = None
+        self._subagent_broker: Any | None = None
         self._grader_proc: multiprocessing.Process | None = None
         self._grader_stop_event: Any | None = None  # multiprocessing.Event
         # Island migration. Only meaningful with >=2 islands and migration
@@ -240,6 +241,9 @@ class AgentManager:
         # 1b2. Start the sandbox provider if configured (must be up before
         # agents spawn — their launch specs embed its live state).
         self._start_sandbox_if_enabled()
+
+        # 1b3. Subagent broker (agents.subagents): runs `claude -p` for agents.
+        self._start_subagent_broker()
 
         # 1c. Start grader daemon. Agents' `coral eval` writes pending attempts;
         #     the daemon picks them up, grades inside an isolated worktree,
@@ -456,6 +460,29 @@ class AgentManager:
         if self.verbose:
             print(f"[coral] Sandbox provider {sb.provider!r} active")
 
+    def _start_subagent_broker(self) -> None:
+        """Start the subagent broker when agents.subagents is on. Idempotent."""
+        if not self.config.agents.subagents or self._subagent_broker is not None:
+            return
+        import shutil
+
+        from coral.agent.subagent_broker import SubagentBroker
+
+        command = self.config.agents.subagent_command
+        if not command or shutil.which(command[0]) is None:
+            raise RuntimeError(
+                f"agents.subagents needs the Claude Code CLI ({command[0] if command else 'claude'}) "
+                "on PATH, logged in to your Claude account."
+            )
+        islands = sorted({s.island_id for s in self.specs if s.island_id is not None}) or [None]
+        self._subagent_broker = SubagentBroker(
+            self.config,
+            self.paths.coral_dir,
+            lambda agent_id: self.paths.agents_dir / agent_id,
+            islands,
+        )
+        self._subagent_broker.start()
+
     def _stop_sandbox(self) -> None:
         """Stop the active sandbox provider if instantiated."""
         if self._sandbox is not None:
@@ -633,6 +660,9 @@ class AgentManager:
         else:
             model = self.config.agents.model
             runtime_options = self.config.agents.runtime_options
+        if self.config.agents.subagents:
+            # Subagent mode: the agent manages; runtimes drop their editing tools.
+            runtime_options = {**(runtime_options or {}), "manager_only": True}
 
         # Runtime-specific: write permission settings per worktree
         if shared_dir_name == ".claude":
@@ -887,6 +917,7 @@ class AgentManager:
         # Start the sandbox provider if configured (resumed agents get
         # fresh launch specs reflecting its new state).
         self._start_sandbox_if_enabled()
+        self._start_subagent_broker()
 
         # Start grader daemon (must be up before resumed agents submit evals).
         self._start_grader_daemon()
@@ -1106,6 +1137,9 @@ class AgentManager:
             self._gateway.stop()
             self._gateway = None
         # Stop the sandbox provider last — nothing else depends on it.
+        if self._subagent_broker is not None:
+            self._subagent_broker.stop()
+            self._subagent_broker = None
         self._stop_sandbox()
         logger.info("All agents stopped.")
 

@@ -10,6 +10,34 @@ _TEMPLATE_PATH = Path(__file__).parent / "coral.md.template"
 _SINGLE_TEMPLATE_PATH = Path(__file__).parent / "coral_single.md.template"
 _MINIMAL_TEMPLATE_PATH = Path(__file__).parent / "coral_minimal.md.template"
 
+_MANAGER_SECTION = """
+
+## Manager mode (subagents)
+
+You are a **manager**. You do no hands-on work yourself: no writing or editing code, no running
+experiments or tests, no literature review, no writing notes or skills. Delegate all of it to
+Claude subagents, and spend your effort on deciding what to try, writing clear briefs, reviewing
+what comes back, scoring it, and coordinating with the team.
+
+- `coral subagent run [--type general|deep-researcher|librarian] [--no-wait] "<brief>"` starts a
+  subagent; without `--no-wait` it blocks and prints the subagent's report. Collect a `--no-wait`
+  subagent with `coral subagent wait <id>`; `coral subagent list` shows yours.
+- At most {max_running} of your subagents can run at once. They all work in your directory (they
+  can edit, compile and test code; they cannot use git{web}), so give parallel subagents separate
+  files, or have each write a new file that you then choose between.
+- Briefs must be self-contained: the goal, the relevant files, what to try, how to test it, and
+  what to report back. Subagents do not see this document, your history or the team's state
+  unless your brief points them to it.
+- `general` writes and tests code and analyses results; `deep-researcher` investigates techniques;
+  `librarian` organises the shared notes.
+- You still run `coral eval` to score your directory, read `coral log`, `coral show` and
+  `coral notes`, use `coral checkout`, and message teammates. Whenever these instructions or a
+  heartbeat ask you to write something (code, a note, a skill, your role or focus file), brief a
+  subagent to do it.
+- Subagent time and money are limited ({run_budget}): give each subagent a substantial, well-scoped
+  task rather than many tiny ones.
+"""
+
 _COOPERATE_SECTION = """
 
 ## Messaging other agents (cooperate mode)
@@ -76,6 +104,7 @@ def generate_coral_md(
                 else ""
             ),
         )
+        rendered = _without_subagents(rendered)
         return rendered + _team_sections(config, agent_id, single_agent, shared_dir, island_id)
 
     template_path = _SINGLE_TEMPLATE_PATH if single_agent else _TEMPLATE_PATH
@@ -153,8 +182,9 @@ def generate_coral_md(
         repeat_research_hint=repeat_research_hint,
     )
 
-    if not config.agents.subagents:
-        rendered = _without_subagents(rendered)
+    # Claude Code's native subagent guidance never applies: subagents, when on,
+    # go through `coral subagent` (see the manager section).
+    rendered = _without_subagents(rendered)
     return rendered + _team_sections(config, agent_id, single_agent, shared_dir, island_id)
 
 
@@ -188,6 +218,17 @@ def _team_sections(
         )
     if config.agents.mode == "cooperate" and not single_agent:
         out += _COOPERATE_SECTION.format(agent_id=agent_id, shared_dir=shared_dir)
+    if config.agents.subagents:
+        a = config.agents
+        out += _MANAGER_SECTION.format(
+            max_running=a.subagent_max_running,
+            web="" if a.internet else " or the internet",
+            run_budget=(
+                f"about ${a.subagent_run_budget_usd:g} for the whole team this run"
+                if a.subagent_run_budget_usd
+                else "per-call budgets apply"
+            ),
+        )
     return out
 
 

@@ -182,12 +182,6 @@ def test_chat_stream_collects_reasoning_text_and_usage(capsys):
     assert events[0]["type"] == "message_start"
 
 
-def test_subagents_are_off_by_default_and_cannot_be_enabled_yet():
-    assert AgentConfig().subagents is False
-    with pytest.raises(ValueError, match="not implemented"):
-        AgentConfig(subagents=True)
-
-
 @pytest.mark.parametrize("instructions", ["minimal", "full"])
 def test_instructions_and_heartbeats_do_not_mention_subagents(instructions):
     md = generate_coral_md(_config(instructions=instructions), "alpha", shared_dir=".pi")

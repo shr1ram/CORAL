@@ -62,6 +62,7 @@ _VISIBLE_COMMANDS = [
     "heartbeat",
     "msg",
     "inbox",
+    "subagent",
     "setup",
     "agents",
 ]
@@ -143,6 +144,7 @@ Agent Internals:
   heartbeat       View/modify per-agent heartbeat actions
   msg             Message another agent (cooperate mode)
   inbox           Read messages from other agents (cooperate mode)
+  subagent        Delegate work to Claude subagents (agents.subagents)
 
 Run 'coral <command> --help' for details on any command."""
 
@@ -509,6 +511,31 @@ Run 'coral <command> --help' for details on any command."""
     p_inbox.add_argument("--all", action="store_true", help="Show every message in the run")
     _add_run_args(p_inbox)
 
+    p_subagent = sub.add_parser(
+        "subagent",
+        help="Delegate work to Claude subagents (agents.subagents)",
+        description="Run, wait for, or list Claude subagents working for this agent.",
+        epilog=(
+            "Examples:\n"
+            '  coral subagent run "Implement simulated annealing in solution.cpp; test on inputs/"\n'
+            '  coral subagent run --no-wait --type librarian "Merge duplicate notes"\n'
+            "  coral subagent wait 3f2a1b9c\n"
+            "  coral subagent list"
+        ),
+        formatter_class=_CommandHelpFormatter,
+    )
+    subagent_sub = p_subagent.add_subparsers(dest="action", required=True)
+    sa_run = subagent_sub.add_parser("run", help="Start a subagent on a self-contained brief")
+    sa_run.add_argument(
+        "--type", default="general", help="general (default), deep-researcher, librarian, ..."
+    )
+    sa_run.add_argument("--no-wait", action="store_true", help="Return at once; collect with wait")
+    sa_run.add_argument("prompt", nargs="+", help="The brief, self-contained")
+    sa_wait = subagent_sub.add_parser("wait", help="Wait for a subagent and print its report")
+    sa_wait.add_argument("id", help="Request id (or prefix)")
+    subagent_sub.add_parser("list", help="Your running and finished subagents")
+    _add_run_args(p_subagent)
+
     p_diff = sub.add_parser(
         "diff",
         help="Show uncommitted changes",
@@ -768,6 +795,7 @@ Run 'coral <command> --help' for details on any command."""
     from coral.cli.messages import cmd_inbox, cmd_msg
     from coral.cli.query import cmd_log, cmd_notes, cmd_runs, cmd_show, cmd_skills
     from coral.cli.start import cmd_resume, cmd_start, cmd_status, cmd_stop
+    from coral.cli.subagent import cmd_subagent
     from coral.cli.ui import cmd_ui
 
     commands = {
@@ -784,6 +812,7 @@ Run 'coral <command> --help' for details on any command."""
         "heartbeat": cmd_heartbeat,
         "msg": cmd_msg,
         "inbox": cmd_inbox,
+        "subagent": cmd_subagent,
         "log": cmd_log,
         "show": cmd_show,
         "notes": cmd_notes,

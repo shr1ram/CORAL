@@ -265,10 +265,18 @@ class AgentConfig:
     # that returns the whole program file, which is written and evaluated; see
     # coral/agent/oneshot.py and agents.runtime_options for its settings.
     loop: str = "agentic"
-    # Specialist subagents (deep-researcher, librarian) seeded into the shared
-    # dir and mentioned in the instructions. Not implemented for this fork's
-    # setup yet, so it must stay off.
+    # Subagent mode: agents become managers that do no hands-on work and
+    # delegate everything (coding, testing, research, notes) to Claude subagents
+    # via `coral subagent`. The manager process runs `claude -p` outside the agent
+    # sandbox on the logged-in Claude subscription, inside Claude Code's own
+    # sandbox; see coral/agent/subagent_broker.py. Requires loop: agentic.
     subagents: bool = False
+    subagent_model: str = "sonnet"
+    subagent_command: list[str] = field(default_factory=lambda: ["claude"])
+    subagent_max_running: int = 2  # per agent, at once; more requests wait
+    subagent_timeout: int = 900  # seconds per call
+    subagent_call_budget_usd: float = 2.0  # --max-budget-usd per call
+    subagent_run_budget_usd: float = 20.0  # whole run, estimated; 0 = no cap
     # Internet access for agents. Off: sandboxed agentic agents can reach only
     # loopback addresses (e.g. a local model server); everything else is
     # refused. Needs agents.sandbox.enabled for agentic agents. One-shot
@@ -308,8 +316,17 @@ class AgentConfig:
             )
         if self.loop not in AGENT_LOOPS:
             raise ValueError(f"agents.loop must be one of {AGENT_LOOPS}, got {self.loop!r}")
-        if self.subagents:
-            raise ValueError("agents.subagents is not implemented yet; leave it false")
+        if self.subagents and self.loop != "agentic":
+            raise ValueError(
+                "agents.subagents needs agents.loop=agentic: a one-shot agent is a single "
+                "model call and cannot manage subagents"
+            )
+        if self.subagent_max_running < 1 or self.subagent_timeout < 1:
+            raise ValueError("agents.subagent_max_running and subagent_timeout must be >= 1")
+        if self.subagent_call_budget_usd <= 0 or self.subagent_run_budget_usd < 0:
+            raise ValueError(
+                "agents.subagent_call_budget_usd must be > 0 and subagent_run_budget_usd >= 0"
+            )
         if self.sandbox.enabled and self.isolate_user:
             raise ValueError(
                 "agents.sandbox and agents.isolate_user are mutually exclusive — "

@@ -29,6 +29,8 @@ from coral.workspace.repo import _clean_env
 logger = logging.getLogger(__name__)
 
 _PI_TOOLS = "read,bash,edit,write,grep,find,ls"
+# agents.subagents: the agent only manages, so it gets no file-editing tools.
+_PI_MANAGER_TOOLS = "read,bash,grep,find,ls"
 
 
 def _extract_pi_session_id(log_path: Path) -> str | None:
@@ -168,7 +170,7 @@ class PiAgentRuntime:
                 "--session-dir",
                 str(session_dir),
                 "--tools",
-                _PI_TOOLS,
+                _PI_MANAGER_TOOLS if (runtime_options or {}).get("manager_only") else _PI_TOOLS,
             ]
         )
         cmd.append(prompt)
