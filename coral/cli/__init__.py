@@ -60,6 +60,8 @@ _VISIBLE_COMMANDS = [
     "checkout",
     "export",
     "heartbeat",
+    "msg",
+    "inbox",
     "setup",
     "agents",
 ]
@@ -139,6 +141,8 @@ Agent Internals:
   checkout        Reset to a previous attempt
   export          Export an attempt as a git branch
   heartbeat       View/modify per-agent heartbeat actions
+  msg             Message another agent (cooperate mode)
+  inbox           Read messages from other agents (cooperate mode)
 
 Run 'coral <command> --help' for details on any command."""
 
@@ -472,6 +476,34 @@ Run 'coral <command> --help' for details on any command."""
         help="Seconds to wait (default: derived from grader.timeout).",
     )
 
+    p_msg = sub.add_parser(
+        "msg",
+        help="Message another agent (cooperate mode)",
+        description="Send a short message to one agent, or to every other agent with 'all'.",
+        epilog=(
+            "Examples:\n"
+            '  coral msg poseidon "Taking the annealing schedule for 3 evals"\n'
+            '  coral msg all "See notes/findings/grid-init.md: grid init beats random"'
+        ),
+        formatter_class=_CommandHelpFormatter,
+    )
+    p_msg.add_argument("to", help="Recipient agent id, or 'all'")
+    p_msg.add_argument("body", nargs="+", help="Message text")
+    p_msg.add_argument(
+        "--from", dest="sender", help="Sender name (default: this worktree's agent id)"
+    )
+    _add_run_args(p_msg)
+
+    p_inbox = sub.add_parser(
+        "inbox",
+        help="Read messages from other agents (cooperate mode)",
+        description="Show unread messages for this agent and mark them read.",
+        epilog="Examples:\n  coral inbox\n  coral inbox --all",
+        formatter_class=_CommandHelpFormatter,
+    )
+    p_inbox.add_argument("--all", action="store_true", help="Show every message in the run")
+    _add_run_args(p_inbox)
+
     p_diff = sub.add_parser(
         "diff",
         help="Show uncommitted changes",
@@ -728,6 +760,7 @@ Run 'coral <command> --help' for details on any command."""
         cmd_wait,
     )
     from coral.cli.heartbeat import cmd_heartbeat
+    from coral.cli.messages import cmd_inbox, cmd_msg
     from coral.cli.query import cmd_log, cmd_notes, cmd_runs, cmd_show, cmd_skills
     from coral.cli.start import cmd_resume, cmd_start, cmd_status, cmd_stop
     from coral.cli.ui import cmd_ui
@@ -744,6 +777,8 @@ Run 'coral <command> --help' for details on any command."""
         "export": cmd_export,
         "diff": cmd_diff,
         "heartbeat": cmd_heartbeat,
+        "msg": cmd_msg,
+        "inbox": cmd_inbox,
         "log": cmd_log,
         "show": cmd_show,
         "notes": cmd_notes,

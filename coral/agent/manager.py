@@ -68,6 +68,7 @@ from coral.hub.heartbeat import (
     write_agent_heartbeat,
     write_global_heartbeat,
 )
+from coral.hub.messages import format_messages, mark_read, read_unread
 from coral.hub.steering import ContinueFromAction, mark_applied, read_pending
 from coral.template.coral_md import generate_coral_md
 from coral.types import BUDGET_CLASS_REAL, Attempt, get_budget_class
@@ -2413,7 +2414,14 @@ class AgentManager:
                         score_history=score_history,
                         minimize=minimize,
                     )
-                    if not actions:
+                    # Cooperate mode: unread messages ride along with the eval
+                    # result, and are enough on their own to resume the agent.
+                    messages = []
+                    if self.config.agents.mode == "cooperate":
+                        messages = read_unread(
+                            self.paths.coral_dir, committing_agent_id, island_id=island_id
+                        )
+                    if not actions and not messages:
                         continue
 
                     # Find the committing agent's handle
@@ -2450,6 +2458,12 @@ class AgentManager:
                     prompts = ["\n".join(header_lines)]
                     action_names = [a.name for a in actions]
                     prompts.extend(a.prompt for a in actions if a.prompt)
+                    if messages:
+                        action_names.append("messages")
+                        prompts.append(
+                            f"## Messages from other agents ({len(messages)} unread)\n\n"
+                            + format_messages(messages)
+                        )
 
                     combined_prompt = "\n\n".join(prompts)
                     names = ", ".join(action_names)
@@ -2466,6 +2480,12 @@ class AgentManager:
                         committing_idx,
                         combined_prompt,
                         prompt_source=f"heartbeat:{names}",
+                    )
+                    mark_read(
+                        self.paths.coral_dir,
+                        committing_agent_id,
+                        [m.id for m in messages],
+                        island_id=island_id,
                     )
                     self._write_agent_pids()
 

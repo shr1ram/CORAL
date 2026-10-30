@@ -9,6 +9,8 @@ from typing import Any
 import yaml
 from omegaconf import MISSING, OmegaConf
 
+AGENT_MODES = ("compete", "cooperate")
+
 
 @dataclass
 class TaskConfig:
@@ -248,6 +250,10 @@ class AgentConfig:
     )
     skills: list[str] = field(default_factory=list)  # skill dirs copied to .coral/public/skills/
     research: bool = True  # enable web search / literature review step in workflow
+    # "compete": agents share only attempts, notes and skills (the original behavior).
+    # "cooperate": agents can also message each other with `coral msg`; unread
+    # messages are delivered with the recipient's next eval result.
+    mode: str = "compete"
     stagger_seconds: int = 0  # delay between spawning each agent (rate-limit backpressure)
 
     # Reliability: crash-burst circuit breaker.
@@ -274,6 +280,8 @@ class AgentConfig:
         # leave nested sandbox config as a plain dict; coerce like RunConfig.stop.
         if isinstance(self.sandbox, dict):
             self.sandbox = SandboxConfig(**self.sandbox)
+        if self.mode not in AGENT_MODES:
+            raise ValueError(f"agents.mode must be one of {AGENT_MODES}, got {self.mode!r}")
         if self.sandbox.enabled and self.isolate_user:
             raise ValueError(
                 "agents.sandbox and agents.isolate_user are mutually exclusive — "

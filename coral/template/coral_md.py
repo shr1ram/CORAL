@@ -9,6 +9,31 @@ from coral.config import CoralConfig
 _TEMPLATE_PATH = Path(__file__).parent / "coral.md.template"
 _SINGLE_TEMPLATE_PATH = Path(__file__).parent / "coral_single.md.template"
 
+_COOPERATE_SECTION = """
+
+## Messaging other agents (cooperate mode)
+
+This run is in **cooperate** mode: besides the shared attempts, notes and skills,
+you can message the other agents directly. Your id is `{agent_id}`.
+
+```bash
+coral msg <agent-id> "text"   # message one agent (ids: see `coral log` or `{shared_dir}/roles/`)
+coral msg all "text"          # message every other agent
+coral inbox                   # read unread messages (they are also appended to your eval results)
+coral inbox --all             # full message history
+```
+
+Use messages for things that need to reach a specific agent soon:
+- **Claims:** "I'm taking X for the next few evals" so nobody duplicates it.
+- **Warnings:** "your commit abc123 fails on edge case Y".
+- **Requests and handoffs:** "can someone profile Z?", "I found a lead on W but I'm on V; who wants it?".
+- **Answers** to questions sent to you.
+
+Keep each message short and actionable (under 2000 characters). Findings that everyone
+should keep belong in a note; send the note's path instead of repeating it. Don't send
+acknowledgements or small talk: every message costs the reader context and time.
+"""
+
 
 def generate_coral_md(
     config: CoralConfig,
@@ -119,6 +144,9 @@ def generate_coral_md(
             "their own attempts, notes, and skills, but you cannot see their "
             "state directly. Each island evolves independently.\n"
         )
+
+    if config.agents.mode == "cooperate" and not single_agent:
+        rendered += _COOPERATE_SECTION.format(agent_id=agent_id, shared_dir=shared_dir)
 
     return rendered
 
