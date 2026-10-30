@@ -30,6 +30,7 @@ from coral.web.api import (
     get_skills,
     get_status,
     get_steering,
+    get_team,
     post_steer,
     switch_run,
 )
@@ -97,6 +98,7 @@ def create_app(
         Route("/api/dag", get_dag),
         Route("/api/notes/graph", get_notes_graph),
         Route("/api/notes", get_notes),
+        Route("/api/team", get_team),
         Route("/api/skills", get_skills),
         Route("/api/skills/{name}", get_skill_detail),
         Route("/api/logs", get_logs_list),

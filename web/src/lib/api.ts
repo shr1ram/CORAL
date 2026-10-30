@@ -272,6 +272,44 @@ export interface TaskConfig {
   };
 }
 
+export type InteractionKind = "message" | "broadcast" | "built_on" | "note_ref";
+export type MemoryKind = "attempt" | "note" | "skill" | "message";
+
+export interface TeamInteraction {
+  t: number;
+  from: string;
+  to: string;
+  kind: InteractionKind;
+  text: string;
+}
+
+export interface TeamMemoryEvent {
+  t: number;
+  kind: MemoryKind;
+  agent: string | null;
+  label: string;
+  score?: number | null;
+  status?: string;
+}
+
+export interface TeamMessage {
+  t: number;
+  id: string;
+  from: string;
+  to: string;
+  body: string;
+}
+
+export interface TeamResponse {
+  mode: "compete" | "cooperate";
+  run_start: number | null;
+  now: number;
+  agents: string[];
+  interactions: TeamInteraction[];
+  memory: TeamMemoryEvent[];
+  messages: TeamMessage[];
+}
+
 /* API functions */
 
 export const api = {
@@ -286,6 +324,7 @@ export const api = {
   agentAttempts: (id: string) => get<Attempt[]>(`/attempts/agent/${id}`),
   notes: () => get<Note[]>("/notes"),
   notesGraph: () => get<NotesGraphResponse>("/notes/graph"),
+  team: () => get<TeamResponse>("/team"),
   skills: () => get<Skill[]>("/skills"),
   skill: (name: string) => get<SkillDetail>(`/skills/${name}`),
   logs: (agentId: string, signal?: AbortSignal) => get<LogData>(`/logs/${agentId}`, signal),

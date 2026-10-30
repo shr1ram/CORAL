@@ -19,6 +19,7 @@ export function useSSE(handlers: Record<string, SSEHandler>) {
       "note:update",
       "log:update",
       "eval:update",
+      "message:update",
     ];
 
     for (const type of eventTypes) {

@@ -70,6 +70,12 @@ class FileWatcher:
                 note_files.extend(notes_dir.rglob("*.md"))
         state["notes_mtime"] = max((f.stat().st_mtime for f in note_files), default=0)
 
+        # Messages (cooperate mode): count
+        state["messages_count"] = sum(
+            len(list((view_root / "messages").glob("*.json")))
+            for view_root in all_view_roots(self.coral_dir)
+        )
+
         # Logs: per-file sizes
         log_sizes: dict[str, int] = {}
         is_multi = (self.coral_dir / "islands").exists()
@@ -122,6 +128,14 @@ class FileWatcher:
                     {
                         "event": "note:update",
                         "data": {"mtime": new_state["notes_mtime"]},
+                    }
+                )
+
+            if new_state["messages_count"] > self._state.get("messages_count", 0):
+                self._broadcast(
+                    {
+                        "event": "message:update",
+                        "data": {"count": new_state["messages_count"]},
                     }
                 )
 

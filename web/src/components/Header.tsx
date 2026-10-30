@@ -4,7 +4,7 @@ import { useSSE } from "../hooks/useSSE";
 import RunSelector from "./RunSelector";
 import SettingsMenu from "./SettingsMenu";
 
-type Tab = "overview" | "dag" | "knowledge" | "logs";
+type Tab = "overview" | "dag" | "knowledge" | "team" | "logs";
 
 interface Props {
   activeTab: Tab;
@@ -15,6 +15,7 @@ const tabs: { key: Tab; label: string }[] = [
   { key: "overview", label: "Overview" },
   { key: "dag", label: "Lineage" },
   { key: "knowledge", label: "Knowledge" },
+  { key: "team", label: "Team" },
   { key: "logs", label: "Logs" },
 ];
 

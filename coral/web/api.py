@@ -226,6 +226,13 @@ async def get_notes_graph(request: Request) -> JSONResponse:
     return JSONResponse(notes_graph(str(_coral_dir(request))))
 
 
+async def get_team(request: Request) -> JSONResponse:
+    """GET /api/team — agents, their interactions, and shared-memory growth over time."""
+    from coral.web.team import team_view
+
+    return JSONResponse(team_view(_coral_dir(request)))
+
+
 async def get_skills(request: Request) -> JSONResponse:
     """GET /api/skills — return all skills."""
     from coral.hub.skills import list_skills

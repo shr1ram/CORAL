@@ -4,8 +4,9 @@ import Overview from "./pages/Overview";
 import Dag from "./pages/Dag";
 import Knowledge from "./pages/Knowledge";
 import Logs from "./pages/Logs";
+import Team from "./pages/Team";
 
-type Tab = "overview" | "dag" | "knowledge" | "logs";
+type Tab = "overview" | "dag" | "knowledge" | "team" | "logs";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
@@ -18,6 +19,7 @@ export default function App() {
         {activeTab === "overview" && <Overview />}
         {activeTab === "dag" && <Dag />}
         {activeTab === "knowledge" && <Knowledge />}
+        {activeTab === "team" && <Team />}
         {activeTab === "logs" && <Logs />}
       </div>
     </div>
