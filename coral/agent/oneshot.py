@@ -61,7 +61,8 @@ def choose_direction(own_scores: list[float | None], agent_id: str, minimize: bo
 
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _TITLE_RE = re.compile(r"^\s*TITLE:\s*(.+)$", re.MULTILINE)
-_MESSAGE_RE = re.compile(r"^\s*MESSAGE\s+([\w.-]+)\s*:\s*(.+)$", re.MULTILINE)
+# "MESSAGE all: x", "MESSAGE to beta: x", and the recipient-less "MESSAGE: x".
+_MESSAGE_RE = re.compile(r"^\s*MESSAGE\b(?:\s+(?:to\s+)?([\w.-]+))?\s*:\s*(.+)$", re.MULTILINE)
 
 
 def _now_ms() -> int:
@@ -86,7 +87,7 @@ def parse_reply(text: str) -> tuple[str | None, str, list[tuple[str, str]]]:
     outside = _FENCE_RE.sub("", text)
     title_match = _TITLE_RE.search(outside)
     title = title_match.group(1).strip()[:120] if title_match else "one-shot attempt"
-    messages = [(to, body.strip()) for to, body in _MESSAGE_RE.findall(outside)]
+    messages = [(to or "all", body.strip()) for to, body in _MESSAGE_RE.findall(outside)]
     return program, title, messages
 
 
@@ -103,6 +104,7 @@ def build_prompt(
     direction: str,
     cooperate: bool,
     agent_id: str,
+    teammates: list[str] | None = None,
 ) -> str:
     parts = [task.strip()]
     for name, text in context_files.items():
@@ -118,10 +120,11 @@ def build_prompt(
         "by your block, so include all of it."
     )
     if cooperate:
+        others = [t for t in (teammates or []) if t != agent_id]
+        one = f" or `MESSAGE <name>: <text>` to one of: {', '.join(others)}" if others else ""
         reply_format += (
-            f" You are agent `{agent_id}`. To tell teammates something useful (a finding, a "
-            "warning, what you are trying), add lines `MESSAGE <agent-id or all>: <text>` "
-            "outside the code block."
+            " To tell teammates something useful (a finding, a warning, what you are trying), "
+            f"add lines `MESSAGE all: <text>` for the whole team{one}, outside the code block."
         )
     parts.append(f"## Your task now\n\n{direction}\n\n{reply_format}")
     return "\n\n".join(parts)
@@ -221,6 +224,7 @@ def _injected_messages(prompt: str) -> list[str]:
 
 def run(args: argparse.Namespace) -> None:
     from coral.cli._helpers import find_coral_dir_and_island, read_agent_id, read_direction
+    from coral.hub._island import island_root
     from coral.hub.attempts import get_leaderboard, read_attempts
     from coral.hub.messages import format_messages, mark_read, read_unread
 
@@ -291,6 +295,9 @@ def run(args: argparse.Namespace) -> None:
             direction=choose_direction(own_scores, agent_id, direction_name == "minimize"),
             cooperate=cooperate,
             agent_id=agent_id,
+            teammates=sorted(
+                p.stem for p in (island_root(coral_dir, island_id) / "roles").glob("*.md")
+            ),
         )
         _emit({"type": "turn_start"})
         try:
@@ -316,6 +323,8 @@ def run(args: argparse.Namespace) -> None:
         )
         if cooperate:
             for to, body in outgoing:
+                if to == agent_id:  # addressed to itself: clearly meant for the team
+                    to = "all"
                 sent = _coral("msg", to, body)
                 _tool_result(
                     f"coral msg {to}", (sent.stdout + sent.stderr).strip(), sent.returncode != 0

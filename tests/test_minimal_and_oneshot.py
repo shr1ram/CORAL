@@ -94,6 +94,32 @@ def test_parse_reply_takes_last_block_title_and_messages():
     ]
 
 
+def test_parse_reply_message_variants():
+    _, _, messages = oneshot.parse_reply(
+        "TITLE: t\nMESSAGE: no recipient\nMESSAGE to beta: hi\nMESSAGE all: everyone\n"
+    )
+    assert messages == [("all", "no recipient"), ("beta", "hi"), ("all", "everyone")]
+
+
+def test_prompt_names_teammates_not_self():
+    prompt = oneshot.build_prompt(
+        task="t",
+        context_files={},
+        target="s.cpp",
+        language="cpp",
+        program="",
+        program_note="",
+        recent=[],
+        messages=[],
+        direction="d",
+        cooperate=True,
+        agent_id="alpha",
+        teammates=["alpha", "beta", "gamma"],
+    )
+    assert "`MESSAGE all: <text>`" in prompt and "one of: beta, gamma" in prompt
+    assert "alpha" not in prompt
+
+
 def test_parse_reply_without_code():
     program, title, messages = oneshot.parse_reply("I think we should try annealing.")
     assert program is None and title == "one-shot attempt" and messages == []
