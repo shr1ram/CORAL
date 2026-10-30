@@ -47,8 +47,14 @@ MINIMAL_PROMPTS: dict[str, str] = {
 }
 
 
-def default_prompt(name: str, instructions: str = "minimal") -> str:
-    """Built-in prompt for a heartbeat action under the given instruction set."""
+def default_prompt(name: str, instructions: str = "minimal", subagents: bool = False) -> str:
+    """Built-in prompt for a heartbeat action under the given instruction set.
+
+    The full lint_wiki prompt spawns the librarian subagent; without subagents
+    it falls back to the minimal one, which uses the organize-files skill.
+    """
+    if name == "lint_wiki" and not subagents:
+        return MINIMAL_PROMPTS[name]
     prompts = MINIMAL_PROMPTS if instructions == "minimal" else DEFAULT_PROMPTS
     return prompts.get(name, "")
 
@@ -261,7 +267,9 @@ def default_local_actions(config) -> list[dict]:
                     "name": action_cfg.name,
                     "every": action_cfg.every,
                     "prompt": action_cfg.prompt
-                    or default_prompt(action_cfg.name, config.agents.instructions),
+                    or default_prompt(
+                        action_cfg.name, config.agents.instructions, config.agents.subagents
+                    ),
                     "trigger": trigger,
                     "options": dict(getattr(action_cfg, "options", {}) or {}),
                 }
@@ -283,7 +291,9 @@ def default_global_actions(config) -> list[dict]:
                     "name": action_cfg.name,
                     "every": action_cfg.every,
                     "prompt": action_cfg.prompt
-                    or default_prompt(action_cfg.name, config.agents.instructions),
+                    or default_prompt(
+                        action_cfg.name, config.agents.instructions, config.agents.subagents
+                    ),
                     "trigger": trigger,
                     "options": dict(getattr(action_cfg, "options", {}) or {}),
                 }

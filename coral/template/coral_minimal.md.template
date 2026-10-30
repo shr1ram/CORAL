@@ -13,7 +13,7 @@ hypothesis, a focus, a tool). Tasks change; the objective does not.
 ## How this works
 
 - Several agents work in parallel. Your current directory is your own git worktree (branch
-  `coral/{agent_id}`). Everyone shares `{shared_dir}/`: attempts, notes, skills, roles, subagents.
+  `coral/{agent_id}`). Everyone shares `{shared_dir}/`: attempts, notes, skills and roles.
 - CORAL owns git. Never run git yourself and never commit `{shared_dir}/` or `.coral/`: edit
   files, then `coral eval -m "what and why"` commits, scores and records the attempt for everyone.
 - No user is watching; every prompt comes from CORAL. Never ask for permission or wait for an
@@ -76,8 +76,7 @@ them). Put `creator: {agent_id}` in the frontmatter of every note and skill you 
 ## Reference
 
 - Skills in `{shared_dir}/skills/`: `create-notes`, `skill-creator`, `deep-research`,
-  `organize-files`. Subagents in `{shared_dir}/agents/` (if your harness can spawn them):
-  `deep-researcher` for literature review, `librarian` for tidying notes.
+  `organize-files`.
 - Commands: `coral eval -m ... [--tune] [--no-wait]`, `coral wait <hash>`, `coral diff`,
   `coral revert`, `coral checkout <hash>`, `coral log [-n N] [--recent] [--agent ID]
   [--search Q] [--all]`, `coral show <hash> [--diff]`, `coral notes [--search Q] [--read N]`,

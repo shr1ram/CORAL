@@ -265,6 +265,10 @@ class AgentConfig:
     # that returns the whole program file, which is written and evaluated; see
     # coral/agent/oneshot.py and agents.runtime_options for its settings.
     loop: str = "agentic"
+    # Specialist subagents (deep-researcher, librarian) seeded into the shared
+    # dir and mentioned in the instructions. Not implemented for this fork's
+    # setup yet, so it must stay off.
+    subagents: bool = False
     stagger_seconds: int = 0  # delay between spawning each agent (rate-limit backpressure)
 
     # Reliability: crash-burst circuit breaker.
@@ -299,6 +303,8 @@ class AgentConfig:
             )
         if self.loop not in AGENT_LOOPS:
             raise ValueError(f"agents.loop must be one of {AGENT_LOOPS}, got {self.loop!r}")
+        if self.subagents:
+            raise ValueError("agents.subagents is not implemented yet; leave it false")
         if self.sandbox.enabled and self.isolate_user:
             raise ValueError(
                 "agents.sandbox and agents.isolate_user are mutually exclusive — "

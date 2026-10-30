@@ -1437,7 +1437,7 @@ class AgentManager:
         heartbeat_actions = []
         for ad in local_actions:
             prompt_template = ad.get("prompt") or default_prompt(
-                ad["name"], self.config.agents.instructions
+                ad["name"], self.config.agents.instructions, self.config.agents.subagents
             )
             prompt = (
                 prompt_template.format(shared_dir=shared_dir, agent_id=agent_id)
@@ -1457,7 +1457,7 @@ class AgentManager:
             )
         for ad in global_actions:
             prompt_template = ad.get("prompt") or default_prompt(
-                ad["name"], self.config.agents.instructions
+                ad["name"], self.config.agents.instructions, self.config.agents.subagents
             )
             prompt = (
                 prompt_template.format(shared_dir=shared_dir, agent_id=agent_id)

@@ -153,7 +153,19 @@ def generate_coral_md(
         repeat_research_hint=repeat_research_hint,
     )
 
+    if not config.agents.subagents:
+        rendered = _without_subagents(rendered)
     return rendered + _team_sections(config, agent_id, single_agent, shared_dir, island_id)
+
+
+def _without_subagents(text: str) -> str:
+    """Drop the full guide's subagent guidance (agents.subagents is off)."""
+    lines = []
+    for line in text.splitlines(keepends=True):
+        line = line.replace(" Often pairs with the `librarian` subagent.", "")
+        if "subagent" not in line.lower():
+            lines.append(line)
+    return "".join(lines)
 
 
 def _team_sections(

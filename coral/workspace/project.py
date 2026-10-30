@@ -75,6 +75,7 @@ def _build_island_subtree(
     island_root: Path,
     effective_config_dir: Path,
     user_skill_paths: list[str],
+    seed_subagents: bool = False,
 ) -> None:
     """Create the per-island state directory tree and seed bundled assets.
 
@@ -108,8 +109,8 @@ def _build_island_subtree(
         else:
             logger.warning(f"Skill directory not found: {src}")
 
-    # Seed bundled subagent templates from coral/template/agents/
-    if _SEED_AGENTS_DIR.is_dir():
+    # Seed bundled subagent templates from coral/template/agents/ (agents.subagents)
+    if seed_subagents and _SEED_AGENTS_DIR.is_dir():
         for agent_file in _SEED_AGENTS_DIR.iterdir():
             if agent_file.is_file():
                 dst = island_root / "agents" / agent_file.name
@@ -249,6 +250,7 @@ def create_project(config: CoralConfig, config_dir: Path | None = None) -> Proje
             coral_dir / "public",
             effective_config_dir,
             list(config.agents.skills),
+            seed_subagents=config.agents.subagents,
         )
     else:
         # Lazy import: coral.agent's package __init__ pulls in the heavy
@@ -265,6 +267,7 @@ def create_project(config: CoralConfig, config_dir: Path | None = None) -> Proje
                 island_root,
                 effective_config_dir,
                 list(config.agents.skills),
+                seed_subagents=config.agents.subagents,
             )
 
     # Save config
