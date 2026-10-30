@@ -2456,6 +2456,13 @@ class AgentManager:
 
                     score_history = self._agent_score_history.get(committing_agent_id, [])
 
+                    # One-shot agents get no heartbeats: they cannot act on them
+                    # (no tools, no notes), the worker reads its own inbox, and
+                    # pivoting is built into its direction choice. Interrupting
+                    # would only restart the worker and cut off a fresh attempt.
+                    if self.config.agents.loop == "oneshot":
+                        continue
+
                     # Check heartbeat actions
                     runner = self._get_heartbeat_runner(committing_agent_id)
                     actions = runner.check(

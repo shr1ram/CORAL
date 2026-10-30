@@ -239,3 +239,67 @@ def test_agentic_without_sandbox_and_internet_off_refuses_to_start(tmp_path):
         {"task": {"name": "t", "description": "d"}, "agents": {"count": 1, "loop": "oneshot"}}
     )
     AgentManager(oneshot)._start_sandbox_if_enabled()  # one-shot agents have no tools
+
+
+def test_direction_rotates_from_history_and_pivots_on_plateau():
+    first = oneshot.choose_direction([], "alpha", minimize=False)
+    second = oneshot.choose_direction([10.0], "alpha", minimize=False)
+    assert first in oneshot.DIRECTIONS and second in oneshot.DIRECTIONS and first != second
+    # three attempts after the best that don't beat it -> pivot
+    pivot = oneshot.choose_direction([10.0, 50.0, 40.0, 45.0, 50.0], "alpha", minimize=False)
+    assert "substantially different" in pivot
+    # an improvement inside the window -> keep rotating
+    assert "substantially" not in oneshot.choose_direction(
+        [10.0, 50.0, 40.0, 60.0, 45.0], "alpha", minimize=False
+    )
+    # minimize: lower is better
+    assert "substantially" in oneshot.choose_direction([5.0, 9.0, 8.0, 7.0], "alpha", minimize=True)
+
+
+def test_manager_sends_no_heartbeats_to_oneshot_agents(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from coral.agent.heartbeat import HeartbeatAction, HeartbeatRunner
+    from coral.agent.manager import AgentManager
+    from coral.workspace.project import ProjectPaths
+
+    cfg = CoralConfig.from_dict(
+        {"task": {"name": "t", "description": "d"}, "agents": {"count": 1, "loop": "oneshot"}}
+    )
+    mgr = AgentManager(cfg)
+    mgr.paths = ProjectPaths(
+        results_dir=tmp_path,
+        task_dir=tmp_path,
+        run_dir=tmp_path,
+        coral_dir=tmp_path / ".coral",
+        agents_dir=tmp_path / "agents",
+        repo_dir=tmp_path / "repo",
+    )
+    (tmp_path / ".coral" / "public").mkdir(parents=True)
+    mgr._running = True
+    mgr.handles = [SimpleNamespace(agent_id="alpha", alive=True)]
+    seen = iter([set(), {"h1"}])
+    interrupted = []
+    monkeypatch.setattr(mgr, "_get_seen_attempts", lambda: next(seen, {"h1"}))
+    monkeypatch.setattr(mgr, "_filter_scored", lambda a: a)
+    monkeypatch.setattr(
+        mgr,
+        "_read_latest_attempt",
+        lambda new, agent_id=None: {"agent_id": "alpha", "score": 1.0, "commit_hash": "abc"},
+    )
+    monkeypatch.setattr(mgr, "_auto_stop_reason_from_current_state", lambda: None)
+    monkeypatch.setattr(mgr, "_auto_stop_reason_from_attempt", lambda a: None)
+    monkeypatch.setattr(mgr, "_get_eval_count", lambda: 1)
+    monkeypatch.setattr(
+        mgr,
+        "_get_heartbeat_runner",
+        lambda a: HeartbeatRunner([HeartbeatAction(name="reflect", every=1, prompt="R")]),
+    )
+    monkeypatch.setattr(mgr, "_interrupt_and_resume", lambda *a, **k: interrupted.append(a))
+    monkeypatch.setattr(mgr, "_maybe_run_migration_cycle", lambda: None)
+    mgr.config.agents.timeout = 0
+    mgr._stop_event.set()
+
+    mgr.monitor_loop(check_interval=0)
+
+    assert interrupted == []

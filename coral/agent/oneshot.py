@@ -31,6 +31,33 @@ DIRECTIONS = (
     "Simplify the program so more search fits in the time limit.",
     "Question an assumption the current program makes and test a different choice.",
 )
+# One-shot agents get no CORAL heartbeats; this is their pivot.
+PIVOT = (
+    "Your last {n} attempts did not beat your best score. Small tweaks are not working: try a "
+    "substantially different approach (a new algorithm, representation or search strategy)."
+)
+PLATEAU_ATTEMPTS = 3
+
+
+def choose_direction(own_scores: list[float | None], agent_id: str, minimize: bool) -> str:
+    """Next attempt's direction, from the agent's own scores in submit order.
+
+    Rotates through DIRECTIONS by attempt count (offset per agent, so agents
+    differ), and switches to PIVOT once the last PLATEAU_ATTEMPTS attempts all
+    failed to beat the agent's best before them. Derived from attempt history,
+    so it survives worker restarts.
+    """
+    n = len(own_scores)
+    if n > PLATEAU_ATTEMPTS:
+        before = [s for s in own_scores[:-PLATEAU_ATTEMPTS] if s is not None]
+        recent = own_scores[-PLATEAU_ATTEMPTS:]
+        if before:
+            best = min(before) if minimize else max(before)
+            improved = any(s is not None and (s < best if minimize else s > best) for s in recent)
+            if not improved:
+                return PIVOT.format(n=PLATEAU_ATTEMPTS)
+    return DIRECTIONS[(n + sum(map(ord, agent_id))) % len(DIRECTIONS)]
+
 
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _TITLE_RE = re.compile(r"^\s*TITLE:\s*(.+)$", re.MULTILINE)
@@ -215,7 +242,6 @@ def run(args: argparse.Namespace) -> None:
     injected = _injected_messages(args.prompt or "")
 
     _emit({"type": "session", "id": uuid.uuid4().hex})
-    attempt = 0
     while True:
         # Start from the best attempt so far (any agent), else the current file.
         best = get_leaderboard(
@@ -236,8 +262,10 @@ def run(args: argparse.Namespace) -> None:
             program = target_path.read_text(encoding="utf-8") if target_path.exists() else ""
             note = "starting program, not yet scored"
 
+        team = sorted(read_attempts(coral_dir, island_id), key=lambda a: a.timestamp)
+        own_scores = [a.score for a in team if a.agent_id == agent_id]
         recent = []
-        for a in sorted(read_attempts(coral_dir, island_id), key=lambda a: a.timestamp)[-8:]:
+        for a in team[-8:]:
             line = f"- {a.agent_id}: score {a.score} ({a.status}): {a.title}"
             if a.agent_id == agent_id and a.feedback:
                 line += "\n  feedback: " + a.feedback.strip().replace("\n", "\n  ")[:1200]
@@ -260,11 +288,10 @@ def run(args: argparse.Namespace) -> None:
             program_note=note,
             recent=recent,
             messages=messages,
-            direction=DIRECTIONS[(attempt + sum(map(ord, agent_id))) % len(DIRECTIONS)],
+            direction=choose_direction(own_scores, agent_id, direction_name == "minimize"),
             cooperate=cooperate,
             agent_id=agent_id,
         )
-        attempt += 1
         _emit({"type": "turn_start"})
         try:
             reasoning, text, usage = chat_stream(
