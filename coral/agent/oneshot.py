@@ -61,8 +61,7 @@ def choose_direction(own_scores: list[float | None], agent_id: str, minimize: bo
 
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _TITLE_RE = re.compile(r"^\s*TITLE:\s*(.+)$", re.MULTILINE)
-# "MESSAGE all: x", "MESSAGE to beta: x", and the recipient-less "MESSAGE: x".
-_MESSAGE_RE = re.compile(r"^\s*MESSAGE\b(?:\s+(?:to\s+)?([\w.-]+))?\s*:\s*(.+)$", re.MULTILINE)
+_MESSAGE_RE = re.compile(r"^\s*MESSAGE\s+([\w.-]+)\s*:\s*(.+)$", re.MULTILINE)
 
 
 def _now_ms() -> int:
@@ -87,7 +86,7 @@ def parse_reply(text: str) -> tuple[str | None, str, list[tuple[str, str]]]:
     outside = _FENCE_RE.sub("", text)
     title_match = _TITLE_RE.search(outside)
     title = title_match.group(1).strip()[:120] if title_match else "one-shot attempt"
-    messages = [(to or "all", body.strip()) for to, body in _MESSAGE_RE.findall(outside)]
+    messages = [(to, body.strip()) for to, body in _MESSAGE_RE.findall(outside)]
     return program, title, messages
 
 
@@ -323,8 +322,6 @@ def run(args: argparse.Namespace) -> None:
         )
         if cooperate:
             for to, body in outgoing:
-                if to == agent_id:  # addressed to itself: clearly meant for the team
-                    to = "all"
                 sent = _coral("msg", to, body)
                 _tool_result(
                     f"coral msg {to}", (sent.stdout + sent.stderr).strip(), sent.returncode != 0

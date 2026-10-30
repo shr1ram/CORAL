@@ -94,13 +94,6 @@ def test_parse_reply_takes_last_block_title_and_messages():
     ]
 
 
-def test_parse_reply_message_variants():
-    _, _, messages = oneshot.parse_reply(
-        "TITLE: t\nMESSAGE: no recipient\nMESSAGE to beta: hi\nMESSAGE all: everyone\n"
-    )
-    assert messages == [("all", "no recipient"), ("beta", "hi"), ("all", "everyone")]
-
-
 def test_prompt_names_teammates_not_self():
     prompt = oneshot.build_prompt(
         task="t",
