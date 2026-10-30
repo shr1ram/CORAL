@@ -1,9 +1,10 @@
-"""Parse Claude Code NDJSON logs into structured turns for the web UI."""
+"""Parse agent NDJSON logs (Claude Code, Pi) into structured turns for the web UI."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,14 +49,53 @@ class LogTurn:
         }
 
 
-def _truncate(text: str, max_lines: int = 25) -> str:
-    """Truncate text to max_lines, keeping first and last portions."""
-    lines = text.split("\n")
-    if len(lines) <= max_lines:
-        return text
-    head = lines[: max_lines - 5]
-    tail = lines[-3:]
-    return "\n".join(head + [f"\n... ({len(lines) - max_lines + 2} lines omitted) ...\n"] + tail)
+# Pi streams one line per token delta, each repeating the whole partial message.
+# Those lines are most of a Pi log; skip them without decoding (message_end has
+# the final content).
+_PI_STREAM_PREFIXES = ('{"type":"message_update"', '{"type":"tool_execution_update"')
+
+
+def _ms_to_iso(ms: Any) -> str:
+    try:
+        return datetime.fromtimestamp(float(ms) / 1000).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def _tool_input_text(tool_input: Any) -> str:
+    """Full tool input for display: the command for bash, else pretty JSON."""
+    if isinstance(tool_input, dict) and set(tool_input) == {"command"}:
+        return str(tool_input["command"])
+    try:
+        return json.dumps(tool_input, indent=2, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(tool_input)
+
+
+def _extract_pi_blocks(content_list: list[dict]) -> list[LogEntry]:
+    """Entries from a Pi assistant message (thinking / text / toolCall blocks)."""
+    entries = []
+    for block in content_list:
+        block_type = block.get("type", "")
+        if block_type == "thinking" and block.get("thinking"):
+            entries.append(LogEntry(type="thinking", content=block["thinking"]))
+        elif block_type == "text" and block.get("text"):
+            entries.append(LogEntry(type="text", content=block["text"]))
+        elif block_type == "toolCall":
+            name = block.get("name", "unknown")
+            args = block.get("arguments", {})
+            entries.append(
+                LogEntry(
+                    type="tool_call",
+                    content=name,
+                    details={
+                        "input_summary": _summarize_tool_input(name, args),
+                        "input": _tool_input_text(args),
+                        "tool_use_id": block.get("id", ""),
+                    },
+                )
+            )
+    return entries
 
 
 def _extract_content_blocks(content_list: list[dict]) -> list[LogEntry]:
@@ -70,7 +110,7 @@ def _extract_content_blocks(content_list: list[dict]) -> list[LogEntry]:
                 entries.append(
                     LogEntry(
                         type="thinking",
-                        content=_truncate(text, max_lines=50),
+                        content=text,
                     )
                 )
 
@@ -88,7 +128,11 @@ def _extract_content_blocks(content_list: list[dict]) -> list[LogEntry]:
                 LogEntry(
                     type="tool_call",
                     content=name,
-                    details={"input_summary": summary, "tool_use_id": block.get("id", "")},
+                    details={
+                        "input_summary": summary,
+                        "input": _tool_input_text(tool_input),
+                        "tool_use_id": block.get("id", ""),
+                    },
                 )
             )
 
@@ -99,7 +143,7 @@ def _extract_content_blocks(content_list: list[dict]) -> list[LogEntry]:
             entries.append(
                 LogEntry(
                     type="tool_result",
-                    content=_truncate(str(content)),
+                    content=str(content),
                     details={"tool_use_id": block.get("tool_use_id", "")},
                 )
             )
@@ -188,7 +232,7 @@ def parse_log_file(path: Path, offset: int = 0) -> tuple[list[LogTurn], int, Ses
 
         for line in f:
             line = line.strip()
-            if not line:
+            if not line or line.startswith(_PI_STREAM_PREFIXES):
                 continue
 
             try:
@@ -231,6 +275,47 @@ def parse_log_file(path: Path, offset: int = 0) -> tuple[list[LogTurn], int, Ses
                     current_turn.entries.append(entry)
                 continue
 
+            if msg_type == "message_end":
+                # Pi: one event per finished message. User messages are the
+                # prompts CORAL sent, already logged as "coral" lines above.
+                message = obj.get("message", {})
+                role = message.get("role")
+                timestamp = _ms_to_iso(message.get("timestamp"))
+                if role == "assistant":
+                    if current_turn and current_turn.entries:
+                        turns.append(current_turn)
+                    current_turn = LogTurn(index=turn_index, timestamp=timestamp)
+                    turn_index += 1
+                    current_turn.entries.extend(_extract_pi_blocks(message.get("content", [])))
+                    usage = message.get("usage") or {}
+                    current_turn.usage = {
+                        "input_tokens": usage.get("input", 0),
+                        "output_tokens": usage.get("output", 0),
+                        "cache_creation": usage.get("cacheWrite", 0),
+                        "cache_read": usage.get("cacheRead", 0),
+                    }
+                elif role == "toolResult":
+                    text = "\n".join(
+                        c.get("text", "")
+                        for c in message.get("content", [])
+                        if isinstance(c, dict) and c.get("type") == "text"
+                    )
+                    if current_turn is None:
+                        current_turn = LogTurn(index=turn_index, timestamp=timestamp)
+                        turn_index += 1
+                    current_turn.entries.append(
+                        LogEntry(
+                            type="tool_result",
+                            content=text,
+                            details={
+                                "tool_use_id": message.get("toolCallId", ""),
+                                "is_error": bool(message.get("isError")),
+                            },
+                            timestamp=timestamp,
+                        )
+                    )
+                continue
+
             if msg_type == "system":
                 subtype = obj.get("subtype", "")
 
@@ -265,7 +350,7 @@ def parse_log_file(path: Path, offset: int = 0) -> tuple[list[LogTurn], int, Ses
                         content=obj.get("description", ""),
                         details={
                             "task_id": obj.get("task_id", ""),
-                            "prompt": _truncate(obj.get("prompt", ""), max_lines=10),
+                            "prompt": obj.get("prompt", ""),
                             "task_type": obj.get("task_type", ""),
                         },
                     )
@@ -437,3 +522,75 @@ def list_log_files(coral_dir: Path) -> dict[str, list[dict[str, Any]]]:
         logs.sort(key=lambda x: (x["modified"], x["index"], x["path"]))
 
     return agents
+
+
+def live_state(path: Path, tail_bytes: int = 4 << 20) -> dict[str, Any] | None:
+    """What a Pi agent is doing right now, from the end of its log.
+
+    Returns ``{"state": ..., "since": iso}`` where state is ``waiting`` (request
+    sent, no tokens back yet: the model is reading the prompt), ``streaming``
+    (with the partial thinking/text so far), ``tool`` (running a tool), or
+    ``idle``. Only the last ``tail_bytes`` of the file are read.
+    """
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            f.seek(max(0, size - tail_bytes))
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+
+    state = _classify(lines)
+    state["context_tokens"] = _last_context_tokens(lines)
+    if not state["context_tokens"] and size > tail_bytes:
+        # A long stream can push the last finished message out of the tail.
+        with open(path, encoding="utf-8", errors="replace") as f:
+            state["context_tokens"] = _last_context_tokens(
+                [line for line in f if line.startswith('{"type":"message_end"')]
+            )
+    return state
+
+
+def _last_context_tokens(lines: list[str]) -> int:
+    """Prompt + output tokens of the last finished model call (the next prompt is at least this)."""
+    for line in reversed(lines):
+        if line.startswith('{"type":"message_end","message":{"role":"assistant"'):
+            try:
+                usage = json.loads(line)["message"].get("usage") or {}
+            except (json.JSONDecodeError, KeyError):
+                continue
+            return int(usage.get("input", 0) + usage.get("cacheRead", 0) + usage.get("output", 0))
+    return 0
+
+
+def _classify(lines: list[str]) -> dict[str, Any]:
+    for line in reversed(lines):
+        line = line.strip()
+        if not line.startswith('{"type":"'):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # the first line of the tail can be cut mid-way
+        kind = obj.get("type")
+        if kind == "message_update":
+            partial = (obj.get("assistantMessageEvent") or {}).get("partial") or {}
+            entries = _extract_pi_blocks(partial.get("content", []))
+            return {
+                "state": "streaming",
+                "since": _ms_to_iso(partial.get("timestamp")),
+                "entries": [
+                    {"type": e.type, "content": e.content, "details": e.details} for e in entries
+                ],
+            }
+        if kind == "message_start" and obj.get("message", {}).get("role") == "assistant":
+            # Request sent, no tokens yet: the model is reading the prompt.
+            return {"state": "waiting", "since": _ms_to_iso(obj["message"].get("timestamp"))}
+        if kind in ("tool_execution_start", "tool_execution_update"):
+            return {"state": "tool", "tool": obj.get("toolName", ""), "since": ""}
+        if kind == "agent_end":
+            return {"state": "idle", "since": ""}
+        if kind in ("message_start", "message_end", "tool_execution_end", "turn_start", "turn_end"):
+            # Between model calls: tool results or a prompt are about to be sent.
+            return {"state": "between", "since": ""}
+    return {"state": "idle", "since": ""}

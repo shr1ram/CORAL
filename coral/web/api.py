@@ -249,6 +249,32 @@ async def get_inference(request: Request) -> JSONResponse:
     )
 
 
+async def get_live(request: Request) -> JSONResponse:
+    """GET /api/live — what each agent is doing now, with its (estimated) server slot."""
+    import asyncio
+
+    from coral.web.inference import manager_alive, match_slots
+    from coral.web.logs import list_log_files, live_state
+
+    coral_dir = _coral_dir(request)
+    latest_logs = {
+        agent: Path(max(files, key=lambda f: (f["modified"], f["index"]))["path"])
+        for agent, files in list_log_files(coral_dir).items()
+    }
+    states = await asyncio.gather(
+        *(asyncio.to_thread(live_state, path) for path in latest_logs.values())
+    )
+    agents = {agent: state or {"state": "idle"} for agent, state in zip(latest_logs, states)}
+
+    sampler = getattr(request.app.state, "inference", None)
+    slots: list[dict[str, Any]] = []
+    if sampler is not None and sampler.latest and manager_alive(coral_dir):
+        slots = sampler.latest.get("slot_detail", [])
+    for agent, slot_id in match_slots(agents, slots).items():
+        agents[agent]["slot"] = next(s for s in slots if s["id"] == slot_id)
+    return JSONResponse({"agents": agents, "slots": slots})
+
+
 async def get_skills(request: Request) -> JSONResponse:
     """GET /api/skills — return all skills."""
     from coral.hub.skills import list_skills

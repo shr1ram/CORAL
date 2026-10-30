@@ -325,6 +325,30 @@ export interface InferenceResponse {
   samples: InferenceSample[];
 }
 
+export interface LiveSlot {
+  id: number;
+  busy: boolean;
+  prompt: number; // prompt length of the current request
+  cached: number; // tokens reused from the slot's cache
+  read: number; // tokens read so far
+  to_read: number; // prompt - cached
+  decoded: number; // tokens generated so far
+}
+
+export interface LiveAgent {
+  state: "waiting" | "streaming" | "tool" | "between" | "idle";
+  since?: string;
+  tool?: string;
+  context_tokens?: number;
+  entries?: Array<Pick<LogEntry, "type" | "content" | "details">>;
+  slot?: LiveSlot; // estimated: llama.cpp does not report which client owns a slot
+}
+
+export interface LiveResponse {
+  agents: Record<string, LiveAgent>;
+  slots: LiveSlot[];
+}
+
 /* API functions */
 
 export const api = {
@@ -341,6 +365,7 @@ export const api = {
   notesGraph: () => get<NotesGraphResponse>("/notes/graph"),
   team: () => get<TeamResponse>("/team"),
   inference: () => get<InferenceResponse>("/inference"),
+  live: () => get<LiveResponse>("/live"),
   skills: () => get<Skill[]>("/skills"),
   skill: (name: string) => get<SkillDetail>(`/skills/${name}`),
   logs: (agentId: string, signal?: AbortSignal) => get<LogData>(`/logs/${agentId}`, signal),

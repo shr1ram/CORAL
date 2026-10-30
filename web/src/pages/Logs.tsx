@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type LogData, type LogTurn, type LogSession, type LogEntry, type RunStatus, type Attempt } from "../lib/api";
 import { useSSE } from "../hooks/useSSE";
 import StatusBadge from "../components/StatusBadge";
+import LivePanel, { LiveBadge } from "../components/LivePanel";
+import { useLive } from "../hooks/useLive";
 
 export default function Logs() {
   const [agentList, setAgentList] = useState<string[]>([]);
@@ -16,6 +18,7 @@ export default function Logs() {
   const abortRef = useRef<AbortController | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fetchInFlight = useRef(false);
+  const live = useLive();
 
   // Track when user scrolls away from bottom
   useEffect(() => {
@@ -133,6 +136,9 @@ export default function Logs() {
                     </span>
                     {agent && <StatusBadge status={agent.status} />}
                   </div>
+                  <div className={`font-mono text-[11px] mb-1.5 ${isSelected ? "text-background/80" : "text-foreground/80"}`}>
+                    <LiveBadge live={live?.agents[id]} />
+                  </div>
                   {agent && (
                     <div
                       className={`font-mono text-[11px] grid grid-cols-2 gap-y-1 gap-x-4 ${
@@ -216,13 +222,18 @@ export default function Logs() {
             {(logData.sessions || [{ session_index: 0, turns: logData.turns }]).map(
               (session, i, arr) => (
                 <SessionBlock
-                  key={session.session_index}
+                  key={`${selectedAgent}-${session.session_index}`}
                   session={session as LogSession}
                   totalSessions={logData.sessions?.length || 1}
                   defaultCollapsed={i < arr.length - 1}
                 />
               )
             )}
+
+            {/* The in-flight model call comes after the last finished turn. */}
+            <div className="mt-4">
+              <LivePanel live={selectedAgent ? live?.agents[selectedAgent] : undefined} />
+            </div>
           </>
         )}
       </div>
@@ -310,7 +321,7 @@ function SessionBlock({
 }
 
 function TurnCard({ turn }: { turn: LogTurn }) {
-  const [expandThinking, setExpandThinking] = useState(false);
+  const [expandThinking, setExpandThinking] = useState(true);
 
   return (
     <div className="py-4 border-b border-border">
@@ -339,7 +350,7 @@ function TurnCard({ turn }: { turn: LogTurn }) {
                 </button>
               </div>
               {expandThinking && (
-                <pre className="mt-1.5 font-mono text-[11px] text-muted-fg leading-relaxed whitespace-pre-wrap max-h-80 overflow-y-auto">
+                <pre className="mt-1.5 font-mono text-[11px] text-muted-fg leading-relaxed whitespace-pre-wrap max-h-96 overflow-y-auto">
                   {entry.content}
                 </pre>
               )}
@@ -352,18 +363,27 @@ function TurnCard({ turn }: { turn: LogTurn }) {
           )}
 
           {entry.type === "tool_call" && (
-            <div className="flex items-start gap-2 p-2 border border-border bg-muted/50 rounded-lg">
-              <span className="font-mono text-[11px] bg-foreground text-background px-1.5 py-0.5 rounded-md shrink-0">
-                {entry.content}
-              </span>
-              <span className="font-mono text-[11px] text-muted-fg truncate">
-                {entry.details?.input_summary}
-              </span>
+            <div className="p-2 border border-border bg-muted/50 rounded-lg">
+              <div className="flex items-start gap-2">
+                <span className="font-mono text-[11px] bg-foreground text-background px-1.5 py-0.5 rounded-md shrink-0">
+                  {entry.content}
+                </span>
+                {!entry.details?.input && (
+                  <span className="font-mono text-[11px] text-muted-fg break-all">
+                    {entry.details?.input_summary}
+                  </span>
+                )}
+              </div>
+              {entry.details?.input && (
+                <pre className="mt-1.5 font-mono text-[11px] text-muted-fg leading-relaxed whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
+                  {entry.details.input}
+                </pre>
+              )}
             </div>
           )}
 
           {entry.type === "tool_result" && (
-            <ToolResult content={entry.content} />
+            <ToolResult content={entry.content} isError={entry.details?.is_error} />
           )}
 
           {entry.type === "text" && (
@@ -414,8 +434,6 @@ function CoralPrompt({ content, source, taskName }: {
   source?: string;
   taskName?: string;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const isLong = content.split("\n").length > 5;
 
   const label =
     source?.startsWith("heartbeat:") ? source.replace("heartbeat:", "").toUpperCase()
@@ -444,48 +462,22 @@ function CoralPrompt({ content, source, taskName }: {
         {taskName && (
           <span className="font-mono text-[11px] font-medium">{taskName}</span>
         )}
-        {isLong && (
-          <button
-            onClick={() => setExpanded(!expanded)}
-            className="font-mono text-[11px] text-muted-fg hover:text-foreground underline decoration-dotted underline-offset-2"
-          >
-            {expanded ? "▲" : "▼"}
-          </button>
-        )}
       </div>
-      <pre
-        className={`font-mono text-[11px] leading-relaxed whitespace-pre-wrap ${
-          !expanded && isLong ? "max-h-24 overflow-hidden relative" : ""
-        }`}
-      >
+      <pre className="font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
         {content}
       </pre>
     </div>
   );
 }
 
-function ToolResult({ content }: { content: string }) {
-  const [expanded, setExpanded] = useState(false);
-  const isLong = content.split("\n").length > 5;
-
+function ToolResult({ content, isError }: { content: string; isError?: boolean }) {
+  const lines = content.split("\n").length;
   return (
     <div className="ml-4 border-l border-border pl-3">
-      <div className="font-mono text-[11px] text-muted-fg flex items-center gap-1.5">
-        <span>Result {isLong && `(${content.split("\n").length}L)`}</span>
-        {isLong && (
-          <button
-            onClick={() => setExpanded(!expanded)}
-            className="hover:text-foreground underline decoration-dotted underline-offset-2"
-          >
-            {expanded ? "▲" : "▼"}
-          </button>
-        )}
+      <div className={`font-mono text-[11px] ${isError ? "text-red-500" : "text-muted-fg"}`}>
+        {isError ? "Error" : "Result"} ({lines}L)
       </div>
-      <pre
-        className={`mt-0.5 font-mono text-[11px] text-muted-fg leading-relaxed whitespace-pre-wrap ${
-          !expanded && isLong ? "max-h-20 overflow-hidden" : ""
-        }`}
-      >
+      <pre className="mt-0.5 font-mono text-[11px] text-muted-fg leading-relaxed whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
         {content}
       </pre>
     </div>

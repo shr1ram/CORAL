@@ -33,6 +33,60 @@ def slot_progress(slots: list[dict[str, Any]]) -> dict[int, tuple[int, int, int]
     return progress
 
 
+def slot_detail(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Per-slot progress on the current request, for the live view."""
+    out = []
+    for slot in slots:
+        busy = bool(slot.get("is_processing"))
+        prompt = slot.get("n_prompt_tokens", 0) if busy else 0
+        cached = slot.get("n_prompt_tokens_cache", 0) if busy else 0
+        out.append(
+            {
+                "id": slot.get("id"),
+                "busy": busy,
+                "prompt": prompt,
+                "cached": cached,
+                "read": slot.get("n_prompt_tokens_processed", 0) if busy else 0,
+                "to_read": max(prompt - cached, 0),
+                "decoded": sum(t.get("n_decoded", 0) for t in slot.get("next_token") or [])
+                if busy
+                else 0,
+            }
+        )
+    return out
+
+
+def match_slots(agents: dict[str, dict[str, Any]], slots: list[dict[str, Any]]) -> dict[str, int]:
+    """Estimate which busy server slot is serving which agent.
+
+    llama.cpp does not know which client a slot belongs to, so pair agents with
+    an in-flight model call to busy slots: an agent still waiting for its first
+    token goes with a slot that is reading its prompt, a streaming agent with a
+    slot that is generating, and the prompt length should be at least the
+    agent's last known context size. Greedy, cheapest pairing first.
+    """
+    pairs = []
+    for agent, state in agents.items():
+        if state.get("state") not in ("waiting", "streaming"):
+            continue
+        context = state.get("context_tokens", 0)
+        for slot in slots:
+            if not slot.get("busy"):
+                continue
+            generating = slot["decoded"] > 0
+            mismatch = (state["state"] == "streaming") != generating
+            shortfall = max(context - slot["prompt"], 0)  # compaction can shrink a prompt
+            cost = abs(slot["prompt"] - context) + 4 * shortfall + (10**6 if mismatch else 0)
+            pairs.append((cost, agent, slot["id"]))
+    assigned: dict[str, int] = {}
+    used: set[int] = set()
+    for _, agent, slot_id in sorted(pairs):
+        if agent not in assigned and slot_id not in used:
+            assigned[agent] = slot_id
+            used.add(slot_id)
+    return assigned
+
+
 def tokens_since(
     before: dict[int, tuple[int, int, int]], after: dict[int, tuple[int, int, int]]
 ) -> tuple[int, int]:
@@ -115,8 +169,8 @@ class InferenceSampler:
                     "reading": sum(1 for _, _, decoded in after.values() if decoded == 0),
                     "slots": len(slots),
                 }
-                self.latest = sample
                 self._append(sample)
+                self.latest = {**sample, "slot_detail": slot_detail(slots)}
             before, last_t = after, now
 
     def _append(self, sample: dict[str, Any]) -> None:
