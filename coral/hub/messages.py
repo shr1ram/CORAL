@@ -67,7 +67,7 @@ def send(
     if len(body) > MAX_BODY_CHARS:
         raise ValueError(
             f"message is {len(body)} characters; keep it under {MAX_BODY_CHARS} "
-            "(put longer findings in a note and send its path)"
+            "(send the key point only)"
         )
     message = Message(sender=sender, to=to, body=body, kind=kind)
     directory = _messages_dir(coral_dir, island_id)

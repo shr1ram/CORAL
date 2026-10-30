@@ -2,6 +2,39 @@ import { useEffect, useRef } from "react";
 
 type SSEHandler = (data: unknown) => void;
 
+const EVENT_TYPES = [
+  "attempt:new",
+  "attempt:update",
+  "note:update",
+  "log:update",
+  "eval:update",
+  "message:update",
+];
+
+/* One EventSource for the whole page, shared by every useSSE caller: opened
+   with the first subscriber, closed with the last. */
+const subscribers = new Set<{ current: Record<string, SSEHandler> }>();
+let source: EventSource | null = null;
+
+function open(): EventSource {
+  const es = new EventSource("/api/events");
+  for (const type of EVENT_TYPES) {
+    es.addEventListener(type, (e) => {
+      let data: unknown;
+      try {
+        data = JSON.parse((e as MessageEvent).data);
+      } catch {
+        return; // ignore parse errors
+      }
+      for (const sub of subscribers) sub.current[type]?.(data);
+    });
+  }
+  // Cross-tab sync: reload when another tab switches runs
+  es.addEventListener("run:switched", () => window.location.reload());
+  es.onerror = () => {};
+  return es;
+}
+
 export function useSSE(handlers: Record<string, SSEHandler>) {
   const handlersRef = useRef(handlers);
   useEffect(() => {
@@ -9,38 +42,14 @@ export function useSSE(handlers: Record<string, SSEHandler>) {
   });
 
   useEffect(() => {
-    const source = new EventSource("/api/events");
-
-    source.addEventListener("connected", () => {});
-
-    const eventTypes = [
-      "attempt:new",
-      "attempt:update",
-      "note:update",
-      "log:update",
-      "eval:update",
-      "message:update",
-    ];
-
-    for (const type of eventTypes) {
-      source.addEventListener(type, (e) => {
-        try {
-          const data = JSON.parse((e as MessageEvent).data);
-          const handler = handlersRef.current[type];
-          if (handler) handler(data);
-        } catch {
-          // ignore parse errors
-        }
-      });
-    }
-
-    // Cross-tab sync: reload when another tab switches runs
-    source.addEventListener("run:switched", () => {
-      window.location.reload();
-    });
-
-    source.onerror = () => {};
-
-    return () => source.close();
+    subscribers.add(handlersRef);
+    source ??= open();
+    return () => {
+      subscribers.delete(handlersRef);
+      if (subscribers.size === 0) {
+        source?.close();
+        source = null;
+      }
+    };
   }, []);
 }

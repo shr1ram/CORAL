@@ -1,9 +1,9 @@
 """Per-agent STATUS lines over <island_root>/status/<agent>.json (one-shot board).
 
-Each one-shot reply may carry `STATUS: <what I'm working on>`; the worker
-stores it here with the attempt's direction and any RECALL question, and the
-prompts of teammates show everyone's latest status. The memory service also
-reads these to tailor each agent's brief.
+Each one-shot reply may carry `STATUS: <what I'm working on>`; after the
+attempt is evaluated the worker stores it here, with any RECALL question, if it
+changed. Teammates' prompts show everyone's latest status, and the memory
+service reads these to tailor each agent's brief.
 """
 
 from __future__ import annotations
@@ -43,6 +43,21 @@ def write_status(
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_json(path, record)
     return record
+
+
+def status_changed(previous: dict[str, Any] | None, status: str | None, recall: str | None) -> bool:
+    """True if a reply's STATUS or RECALL differs from what is on record.
+
+    A missing STATUS keeps the old one, so only a new, different line counts;
+    a RECALL counts whenever it is a new question.
+    """
+    previous = previous or {}
+    new_status = (status or "").strip()[:300]
+    new_recall = (recall or "").strip()[:500]
+    return bool(
+        (new_status and new_status != previous.get("status", ""))
+        or (new_recall and new_recall != previous.get("recall", ""))
+    )
 
 
 def read_status(

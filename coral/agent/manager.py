@@ -94,6 +94,46 @@ from coral.workspace import (
 logger = logging.getLogger(__name__)
 
 
+def check_run_prerequisites(config: CoralConfig, *, docker: bool = False) -> None:
+    """Fail before anything is created when the run's settings cannot be honoured.
+
+    - ``agents.internet`` false (the default) is enforced for agentic agents by
+      the srt sandbox, so it needs ``agents.sandbox.enabled``. CORAL's Docker
+      session uses OS-user isolation instead of srt and cannot enforce it.
+      One-shot agents have no tools, so they need nothing.
+    - ``agents.subagents`` needs the Claude Code CLI.
+
+    ``docker`` marks a run that will execute in CORAL's Docker session (the
+    outer ``coral start`` process knows this before the container exists).
+    """
+    agents = config.agents
+    if agents.loop == "agentic" and not agents.internet:
+        if docker or agents.isolate_user:
+            raise RuntimeError(
+                "agents.internet is false (the default), but CORAL's Docker session "
+                "isolates agents with an OS user instead of the srt sandbox, so it cannot "
+                "block their internet access. Set agents.internet=true for this run, or use "
+                "run.session=local or tmux with agents.sandbox.enabled=true."
+            )
+        if not agents.sandbox.enabled:
+            raise RuntimeError(
+                "agents.internet is false (the default), which agentic agents need the srt "
+                "sandbox to enforce. Set agents.sandbox.enabled=true (requires "
+                "`npm install -g @anthropic-ai/sandbox-runtime`), or set agents.internet=true "
+                "to give agents internet access."
+            )
+    if agents.subagents:
+        import shutil
+
+        command = agents.subagent_command
+        if not command or shutil.which(command[0]) is None:
+            raise RuntimeError(
+                f"agents.subagents needs the Claude Code CLI "
+                f"({command[0] if command else 'claude'}) on PATH, logged in to your "
+                "Claude account."
+            )
+
+
 class AgentManager:
     """Manage the lifecycle of multiple CORAL agents."""
 
@@ -227,6 +267,8 @@ class AgentManager:
 
     def start_all(self) -> list[AgentHandle]:
         """Create workspace structure and spawn all agents."""
+        # Before create_project: a refused start must leave nothing behind.
+        check_run_prerequisites(self.config)
         self._start_time = datetime.now(UTC)
 
         # 1. Create project structure
@@ -443,13 +485,10 @@ class AgentManager:
         backend starts its allow-all proxy here; other backends might open
         an API session or warm a VM pool).
         """
+        # Normally already checked before the run dir was created (start_all,
+        # resume_all, cmd_start); repeated for callers that start pieces directly.
+        check_run_prerequisites(self.config)
         sb = self.config.agents.sandbox
-        agents = self.config.agents
-        if not sb.enabled and not agents.internet and agents.loop == "agentic":
-            raise RuntimeError(
-                "agents.internet is false, which needs agents.sandbox.enabled=true to "
-                "enforce for agentic agents. Enable the sandbox or set agents.internet=true."
-            )
         if not sb.enabled or self._sandbox is not None:
             return
 
@@ -489,16 +528,9 @@ class AgentManager:
         """Start the subagent broker when agents.subagents is on. Idempotent."""
         if not self.config.agents.subagents or self._subagent_broker is not None:
             return
-        import shutil
-
         from coral.agent.subagent_broker import SubagentBroker
 
-        command = self.config.agents.subagent_command
-        if not command or shutil.which(command[0]) is None:
-            raise RuntimeError(
-                f"agents.subagents needs the Claude Code CLI ({command[0] if command else 'claude'}) "
-                "on PATH, logged in to your Claude account."
-            )
+        # The CLI's presence was checked by check_run_prerequisites.
         islands = sorted({s.island_id for s in self.specs if s.island_id is not None}) or [None]
         self._subagent_broker = SubagentBroker(
             self.config,
@@ -932,6 +964,7 @@ class AgentManager:
         resume_from: str | None = None,
     ) -> list[AgentHandle]:
         """Resume agents into an existing run's worktrees."""
+        check_run_prerequisites(self.config)
         self._start_time = datetime.now(UTC)
         self.paths = paths
         self._last_migrated_eval = _read_last_migrated_evals(paths.coral_dir)
@@ -2373,6 +2406,171 @@ class AgentManager:
             self.specs_by_id[agent_id] = updated
             return
 
+    def _read_scored_attempts(self, files: set[str]) -> list[dict[str, Any]]:
+        """Parse attempt files, oldest first (by recorded timestamp, then mtime)."""
+        out: list[tuple[str, float, dict[str, Any]]] = []
+        for fname in files:
+            path = self._resolve_attempt_path(fname)
+            if path is None:
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                mtime = path.stat().st_mtime
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(f"Failed to read attempt {path}: {e}")
+                continue
+            out.append((str(data.get("timestamp", "")), mtime, data))
+        out.sort(key=lambda t: (t[0], t[1]))
+        return [d for _, _, d in out]
+
+    def _handle_scored_attempt(self, attempt_data: dict[str, Any]) -> bool:
+        """Update counters for one scored attempt and fire its heartbeats.
+
+        Returns True when the run auto-stopped. Kept out of monitor_loop so an
+        early return never skips the loop tail (migration, dead-agent restarts,
+        stall checks and the inter-tick sleep).
+        """
+        committing_agent_id = attempt_data.get("agent_id")
+        if not committing_agent_id:
+            return False
+
+        # Increment per-agent eval count
+        self._agent_eval_counts[committing_agent_id] = (
+            self._agent_eval_counts.get(committing_agent_id, 0) + 1
+        )
+        agent_eval_count = self._agent_eval_counts[committing_agent_id]
+        # Per-agent eval count drives local heartbeat triggers; in
+        # multi-island mode the "global" cadence reads the agent's
+        # OWN island counter (each island has its own _global.json).
+        island_id = self._agent_island.get(committing_agent_id)
+        if island_id is not None:
+            global_eval_count = read_eval_count(self.paths.coral_dir, island_id=island_id)
+        else:
+            global_eval_count = self._get_eval_count()
+
+        # Only "real" attempts advance plateau pressure. Tune-mode
+        # and grader_error attempts are recorded but don't trigger
+        # pivot heartbeat actions.
+        budget_class = get_budget_class(attempt_data.get("metadata"))
+        score = attempt_data.get("score")
+        minimize = self.config.grader.direction == "minimize"
+        if budget_class == BUDGET_CLASS_REAL:
+            # Update strict-> personal best (always, regardless of epsilon)
+            if score is not None:
+                prev_best = self._agent_best_scores.get(committing_agent_id)
+                strictly_improved = (
+                    prev_best is None
+                    or (minimize and score < prev_best)
+                    or (not minimize and score > prev_best)
+                )
+                if strictly_improved:
+                    self._agent_best_scores[committing_agent_id] = score
+            # Append to score history (None for broken evals — they
+            # apply plateau pressure without resetting any anchor).
+            self._agent_score_history.setdefault(committing_agent_id, []).append(score)
+
+        auto_stop_reason = (
+            self._auto_stop_reason_from_attempt(attempt_data)
+            or self._auto_stop_reason_from_current_state()
+        )
+        if auto_stop_reason is not None:
+            self._auto_stop(auto_stop_reason)
+            return True
+
+        score_history = self._agent_score_history.get(committing_agent_id, [])
+
+        # One-shot agents get no heartbeats: they cannot act on them
+        # (no tools, no notes), the worker reads its own inbox, and
+        # pivoting is built into its direction choice. Interrupting
+        # would only restart the worker and cut off a fresh attempt.
+        if self.config.agents.loop == "oneshot":
+            return False
+
+        # Check heartbeat actions
+        runner = self._get_heartbeat_runner(committing_agent_id)
+        actions = runner.check(
+            local_eval_count=agent_eval_count,
+            global_eval_count=global_eval_count,
+            score_history=score_history,
+            minimize=minimize,
+        )
+        # Cooperate mode: unread messages ride along with the eval
+        # result, and are enough on their own to resume the agent.
+        messages = []
+        if self.config.agents.mode == "cooperate":
+            messages = read_unread(self.paths.coral_dir, committing_agent_id, island_id=island_id)
+        if not actions and not messages:
+            return False
+
+        # Find the committing agent's handle
+        committing_idx = None
+        for i, handle in enumerate(self.handles):
+            if handle.agent_id == committing_agent_id and handle.alive:
+                committing_idx = i
+                break
+        if committing_idx is None:
+            return False
+
+        # Build eval header + combined heartbeat prompts
+        score_str = f"{score:.10f}" if score is not None else "FAILED"
+        commit = attempt_data.get("commit_hash", "unknown")[:12]
+        feedback = attempt_data.get("feedback", "")
+        title = attempt_data.get("title", "")
+
+        header_lines = [
+            f"## Eval #{agent_eval_count} Results",
+            "",
+            f"Score: {score_str}",
+            f"Commit: {commit}",
+            f"What you did: {title}",
+        ]
+        if budget_class != BUDGET_CLASS_REAL:
+            header_lines.append(
+                f"Budget: {budget_class} (this attempt does not count toward your plateau budget)"
+            )
+        if feedback:
+            header_lines.append(f"Feedback: {feedback}")
+        header_lines.append("")
+
+        prompts = ["\n".join(header_lines)]
+        action_names = [a.name for a in actions]
+        prompts.extend(a.prompt for a in actions if a.prompt)
+        if messages:
+            action_names.append("messages")
+            prompts.append(
+                f"## Messages from other agents ({len(messages)} unread)\n\n"
+                + format_messages(messages)
+            )
+
+        combined_prompt = "\n\n".join(prompts)
+        names = ", ".join(action_names)
+        logger.info(
+            f"Heartbeat [{names}] (agent eval #{agent_eval_count}): "
+            f"interrupting {committing_agent_id}"
+        )
+        if self.verbose:
+            print(
+                f"\n[coral] Agent eval #{agent_eval_count}: score={attempt_data.get('score', '?')}"
+            )
+            print(f"[coral] Interrupting {committing_agent_id} for {names}...\n")
+        resumed = self._interrupt_and_resume(
+            committing_idx,
+            combined_prompt,
+            prompt_source=f"heartbeat:{names}",
+        )
+        self.handles[committing_idx] = resumed
+        # Only count messages as delivered if the agent actually came back up;
+        # otherwise they stay unread and ride along with its next eval.
+        if messages and getattr(resumed, "alive", False):
+            mark_read(
+                self.paths.coral_dir,
+                committing_agent_id,
+                [m.id for m in messages],
+                island_id=island_id,
+            )
+        self._write_agent_pids()
+        return False
+
     def monitor_loop(self, check_interval: int = 5) -> None:
         """Monitor agents, deliver eval feedback via --resume, auto-restart.
 
@@ -2431,149 +2629,16 @@ class AgentManager:
             seen_attempts = seen_attempts | scored_new
 
             if scored_new:
-                attempt_data = self._read_latest_attempt(scored_new)
-
-                if attempt_data:
-                    committing_agent_id = attempt_data.get("agent_id")
-                    if not committing_agent_id:
-                        continue
-
-                    # Increment per-agent eval count
-                    self._agent_eval_counts[committing_agent_id] = (
-                        self._agent_eval_counts.get(committing_agent_id, 0) + 1
-                    )
-                    agent_eval_count = self._agent_eval_counts[committing_agent_id]
-                    # Per-agent eval count drives local heartbeat triggers; in
-                    # multi-island mode the "global" cadence reads the agent's
-                    # OWN island counter (each island has its own _global.json).
-                    island_id = self._agent_island.get(committing_agent_id)
-                    if island_id is not None:
-                        global_eval_count = read_eval_count(
-                            self.paths.coral_dir, island_id=island_id
-                        )
-                    else:
-                        global_eval_count = self._get_eval_count()
-
-                    # Only "real" attempts advance plateau pressure. Tune-mode
-                    # and grader_error attempts are recorded but don't trigger
-                    # pivot heartbeat actions.
-                    budget_class = get_budget_class(attempt_data.get("metadata"))
-                    score = attempt_data.get("score")
-                    minimize = self.config.grader.direction == "minimize"
-                    if budget_class == BUDGET_CLASS_REAL:
-                        # Update strict-> personal best (always, regardless of epsilon)
-                        if score is not None:
-                            prev_best = self._agent_best_scores.get(committing_agent_id)
-                            strictly_improved = (
-                                prev_best is None
-                                or (minimize and score < prev_best)
-                                or (not minimize and score > prev_best)
-                            )
-                            if strictly_improved:
-                                self._agent_best_scores[committing_agent_id] = score
-                        # Append to score history (None for broken evals — they
-                        # apply plateau pressure without resetting any anchor).
-                        self._agent_score_history.setdefault(committing_agent_id, []).append(score)
-
-                    auto_stop_reason = (
-                        self._auto_stop_reason_from_attempt(attempt_data)
-                        or self._auto_stop_reason_from_current_state()
-                    )
-                    if auto_stop_reason is not None:
-                        self._auto_stop(auto_stop_reason)
+                # Handle every newly scored attempt (oldest first) so per-agent
+                # eval counts and score histories stay exact when several
+                # agents score in the same tick.
+                stopped = False
+                for attempt_data in self._read_scored_attempts(scored_new):
+                    if self._handle_scored_attempt(attempt_data):
+                        stopped = True
                         break
-
-                    score_history = self._agent_score_history.get(committing_agent_id, [])
-
-                    # One-shot agents get no heartbeats: they cannot act on them
-                    # (no tools, no notes), the worker reads its own inbox, and
-                    # pivoting is built into its direction choice. Interrupting
-                    # would only restart the worker and cut off a fresh attempt.
-                    if self.config.agents.loop == "oneshot":
-                        continue
-
-                    # Check heartbeat actions
-                    runner = self._get_heartbeat_runner(committing_agent_id)
-                    actions = runner.check(
-                        local_eval_count=agent_eval_count,
-                        global_eval_count=global_eval_count,
-                        score_history=score_history,
-                        minimize=minimize,
-                    )
-                    # Cooperate mode: unread messages ride along with the eval
-                    # result, and are enough on their own to resume the agent.
-                    messages = []
-                    if self.config.agents.mode == "cooperate":
-                        messages = read_unread(
-                            self.paths.coral_dir, committing_agent_id, island_id=island_id
-                        )
-                    if not actions and not messages:
-                        continue
-
-                    # Find the committing agent's handle
-                    committing_idx = None
-                    for i, handle in enumerate(self.handles):
-                        if handle.agent_id == committing_agent_id and handle.alive:
-                            committing_idx = i
-                            break
-                    if committing_idx is None:
-                        continue
-
-                    # Build eval header + combined heartbeat prompts
-                    score_str = f"{score:.10f}" if score is not None else "FAILED"
-                    commit = attempt_data.get("commit_hash", "unknown")[:12]
-                    feedback = attempt_data.get("feedback", "")
-                    title = attempt_data.get("title", "")
-
-                    header_lines = [
-                        f"## Eval #{agent_eval_count} Results",
-                        "",
-                        f"Score: {score_str}",
-                        f"Commit: {commit}",
-                        f"What you did: {title}",
-                    ]
-                    if budget_class != BUDGET_CLASS_REAL:
-                        header_lines.append(
-                            f"Budget: {budget_class} "
-                            "(this attempt does not count toward your plateau budget)"
-                        )
-                    if feedback:
-                        header_lines.append(f"Feedback: {feedback}")
-                    header_lines.append("")
-
-                    prompts = ["\n".join(header_lines)]
-                    action_names = [a.name for a in actions]
-                    prompts.extend(a.prompt for a in actions if a.prompt)
-                    if messages:
-                        action_names.append("messages")
-                        prompts.append(
-                            f"## Messages from other agents ({len(messages)} unread)\n\n"
-                            + format_messages(messages)
-                        )
-
-                    combined_prompt = "\n\n".join(prompts)
-                    names = ", ".join(action_names)
-                    logger.info(
-                        f"Heartbeat [{names}] (agent eval #{agent_eval_count}): "
-                        f"interrupting {committing_agent_id}"
-                    )
-                    if self.verbose:
-                        print(
-                            f"\n[coral] Agent eval #{agent_eval_count}: score={attempt_data.get('score', '?')}"
-                        )
-                        print(f"[coral] Interrupting {committing_agent_id} for {names}...\n")
-                    self.handles[committing_idx] = self._interrupt_and_resume(
-                        committing_idx,
-                        combined_prompt,
-                        prompt_source=f"heartbeat:{names}",
-                    )
-                    mark_read(
-                        self.paths.coral_dir,
-                        committing_agent_id,
-                        [m.id for m in messages],
-                        island_id=island_id,
-                    )
-                    self._write_agent_pids()
+                if stopped:
+                    break
 
             # Migration phase. Cheap when disabled (single-island mode or
             # config off): should_run() short-circuits without scanning disk.

@@ -6,13 +6,22 @@ Summing the growth of those counters between polls gives the server's total
 generation tokens/s and prompt-reading tokens/s. A slot re-reading a long
 prompt after a cache miss shows up as prompt tokens/s, not as idle time.
 Samples are appended to ``<coral_dir>/inference.jsonl`` (outside ``public/``,
-so agents never see it) so replays of a run can show throughput later.
+so agents never see it) so replays of a run can show throughput later. Each
+sample stores the token counts themselves (``gen``, ``prompt``) as well as the
+rates, so totals are sums rather than rate × gap estimates.
+
+Limitation: ``/slots`` only shows requests that are still running. Tokens a
+request decodes after the last poll and before it finishes are never seen, so
+totals undercount slightly (by at most ``interval`` × rate per request). The
+cumulative counters on ``/metrics`` would fix this, but llama-server only
+serves them when started with ``--metrics``; the 1 s poll keeps the gap small.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -73,10 +82,10 @@ def match_slots(agents: dict[str, dict[str, Any]], slots: list[dict[str, Any]]) 
         for slot in slots:
             if not slot.get("busy"):
                 continue
-            generating = slot["decoded"] > 0
-            mismatch = (state["state"] == "streaming") != generating
+            if (state["state"] == "streaming") != (slot["decoded"] > 0):
+                continue  # a waiting agent can't be on a generating slot, and vice versa
             shortfall = max(context - slot["prompt"], 0)  # compaction can shrink a prompt
-            cost = abs(slot["prompt"] - context) + 4 * shortfall + (10**6 if mismatch else 0)
+            cost = abs(slot["prompt"] - context) + 4 * shortfall
             pairs.append((cost, agent, slot["id"]))
     assigned: dict[str, int] = {}
     used: set[int] = set()
@@ -115,25 +124,79 @@ def manager_alive(coral_dir: Path) -> bool:
     return is_process_alive(pid)
 
 
-def read_samples(coral_dir: Path) -> list[dict[str, Any]]:
+_SAMPLES: dict[str, tuple[int, int, list[dict[str, Any]]]] = {}  # path → (inode, offset, samples)
+_SAMPLES_LOCK = threading.Lock()
+
+
+def samples_for(coral_dir: Path) -> list[dict[str, Any]]:
+    """All samples recorded for a run, read incrementally and kept in memory.
+
+    Only bytes appended since the previous call are parsed. Returns a shared
+    list; callers must not mutate it.
+    """
     path = Path(coral_dir) / SAMPLES_FILE
-    samples = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return samples
-    for line in lines:
+    key = str(path)
+    with _SAMPLES_LOCK:
         try:
-            samples.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return samples
+            st = path.stat()
+        except OSError:
+            _SAMPLES.pop(key, None)
+            return []
+        inode, offset, samples = _SAMPLES.get(key, (st.st_ino, 0, []))
+        if inode != st.st_ino or st.st_size < offset:
+            offset, samples = 0, []
+        if st.st_size > offset:
+            with path.open("rb") as f:
+                f.seek(offset)
+                data = f.read()
+            cut = data.rfind(b"\n") + 1  # leave a partly written last line for next time
+            for line in data[:cut].splitlines():
+                try:
+                    samples.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            offset += cut
+        _SAMPLES[key] = (st.st_ino, offset, samples)
+        return samples
+
+
+def read_samples(coral_dir: Path) -> list[dict[str, Any]]:
+    return list(samples_for(coral_dir))
+
+
+def downsample(samples: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """At most ``limit`` samples for charting, merging neighbours into buckets.
+
+    Token counts are summed and rates recomputed over the bucket, so totals
+    are preserved.
+    """
+    if limit <= 0 or len(samples) <= limit:
+        return list(samples)
+    size = -(-len(samples) // limit)
+    out = []
+    for i in range(0, len(samples), size):
+        bucket = samples[i : i + size]
+        last = dict(bucket[-1])
+        if all("gen" in x and "dt" in x for x in bucket):
+            dt = sum(x["dt"] for x in bucket) or 1.0
+            last["gen"] = sum(x["gen"] for x in bucket)
+            last["prompt"] = sum(x.get("prompt", 0) for x in bucket)
+            last["dt"] = round(dt, 3)
+            last["tok_s"] = round(last["gen"] / dt, 1)
+            last["prompt_tok_s"] = round(last["prompt"] / dt, 1)
+        else:
+            for k in ("tok_s", "prompt_tok_s"):
+                vals = [x[k] for x in bucket if k in x]
+                if vals:
+                    last[k] = round(sum(vals) / len(vals), 1)
+        out.append(last)
+    return out
 
 
 class InferenceSampler:
     """Poll ``<url>/slots`` and record total tokens/s into the active run."""
 
-    def __init__(self, url: str, coral_dir_getter, run_alive, interval: float = 2.0) -> None:
+    def __init__(self, url: str, coral_dir_getter, run_alive, interval: float = 1.0) -> None:
         self.url = url.rstrip("/")
         self.coral_dir = coral_dir_getter
         self.run_alive = run_alive  # only record into a run that is running
@@ -161,15 +224,19 @@ class InferenceSampler:
             after = slot_progress(slots)
             if before is not None:
                 read, generated = tokens_since(before, after)
+                dt = max(now - last_t, 1e-3)
                 sample = {
                     "t": now,
-                    "tok_s": round(generated / (now - last_t), 1),
-                    "prompt_tok_s": round(read / (now - last_t), 1),
+                    "dt": round(dt, 3),
+                    "gen": generated,
+                    "prompt": read,
+                    "tok_s": round(generated / dt, 1),
+                    "prompt_tok_s": round(read / dt, 1),
                     "active": len(after),
                     "reading": sum(1 for _, _, decoded in after.values() if decoded == 0),
                     "slots": len(slots),
                 }
-                self._append(sample)
+                await asyncio.to_thread(self._append, sample)
                 self.latest = {**sample, "slot_detail": slot_detail(slots)}
             before, last_t = after, now
 

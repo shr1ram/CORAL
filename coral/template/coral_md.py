@@ -1,4 +1,10 @@
-"""Generate CORAL.md agent instructions from template."""
+"""Generate CORAL.md agent instructions from template.
+
+``agents.instructions: full`` renders the original long-form guide, but intentionally
+differs from upstream CORAL: its Claude Code native subagent guidance (``{shared_dir}/agents/``,
+"spawn specialist subagents") is removed, because subagents here only exist as
+``coral subagent`` in manager mode (agents.subagents), described by ``_MANAGER_SECTION``.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +15,7 @@ from coral.config import CoralConfig
 _TEMPLATE_PATH = Path(__file__).parent / "coral.md.template"
 _SINGLE_TEMPLATE_PATH = Path(__file__).parent / "coral_single.md.template"
 _MINIMAL_TEMPLATE_PATH = Path(__file__).parent / "coral_minimal.md.template"
+_MINIMAL_SINGLE_TEMPLATE_PATH = Path(__file__).parent / "coral_minimal_single.md.template"
 
 _MANAGER_SECTION = """
 
@@ -28,8 +35,8 @@ what comes back, scoring it, and coordinating with the team.
 - Briefs must be self-contained: the goal, the relevant files, what to try, how to test it, and
   what to report back. Subagents do not see this document, your history or the team's state
   unless your brief points them to it.
-- `general` writes and tests code and analyses results; `deep-researcher` investigates techniques;
-  `librarian` organises the shared notes.
+- `general` writes and tests code and analyses results; `deep-researcher` investigates
+  techniques{researcher_scope}; `librarian` organises the shared notes.
 - You still run `coral eval` to score your directory, read `coral log`, `coral show` and
   `coral notes`, use `coral checkout`, and message teammates. Whenever these instructions or a
   heartbeat ask you to write something (code, a note, a skill, your role or focus file), brief a
@@ -89,26 +96,23 @@ def generate_coral_md(
     score_direction = _get_score_direction(config)
 
     if config.agents.instructions == "minimal":
-        rendered = _MINIMAL_TEMPLATE_PATH.read_text(encoding="utf-8").format(
+        minimal_path = _MINIMAL_SINGLE_TEMPLATE_PATH if single_agent else _MINIMAL_TEMPLATE_PATH
+        rendered = minimal_path.read_text(encoding="utf-8").format(
             task_name=config.task.name,
             task_description=config.task.description.strip(),
             tips_section=tips_section,
             score_direction=score_direction,
             agent_id=agent_id,
             shared_dir=shared_dir,
-            research_line=(
-                " Before your first implementation and when changing direction, research the "
-                f"problem with the `deep-research` skill; track coverage in "
-                f"`{shared_dir}/notes/research/_coverage.md`."
-                if config.agents.research
-                else ""
-            ),
+            research_line=_minimal_research_line(config, shared_dir),
         )
-        rendered = _without_subagents(rendered)
         return rendered + _team_sections(config, agent_id, single_agent, shared_dir, island_id)
 
     template_path = _SINGLE_TEMPLATE_PATH if single_agent else _TEMPLATE_PATH
-    template = template_path.read_text(encoding="utf-8")
+    # Claude Code's native subagent guidance never applies: subagents, when on,
+    # go through `coral subagent` (see the manager section). Stripped from the
+    # template before formatting so task text mentioning subagents survives.
+    template = _without_subagents(template_path.read_text(encoding="utf-8"))
 
     # Research step is conditional
     research_enabled = config.agents.research
@@ -125,11 +129,16 @@ def generate_coral_md(
             f"`{shared_dir}/grader/` (the exact code that scores you — read it to "
             "understand the objective, but never modify it), identify constraints "
             "and evaluation criteria.\n"
-            "- **Survey the literature** — use web search to find state-of-the-art approaches, "
-            "academic papers, benchmark comparisons, and existing implementations. "
-            'Search broadly first (`"[problem] state of the art"`), then drill into '
-            "specific techniques.\n"
-            "- **Review domain knowledge** — if the task involves specialized domains "
+            + (
+                "- **Survey the literature** — use web search to find state-of-the-art approaches, "
+                "academic papers, benchmark comparisons, and existing implementations. "
+                'Search broadly first (`"[problem] state of the art"`), then drill into '
+                "specific techniques.\n"
+                if config.agents.internet
+                else "- **Work from what you have** — you have no internet access: draw on what "
+                "you know, the problem statement, the grader and the files in your directory.\n"
+            )
+            + "- **Review domain knowledge** — if the task involves specialized domains "
             "(biology, chemistry, physics, math), research the underlying science. "
             "Understanding the domain often reveals approaches that pure ML/CS thinking misses.\n"
             "- **Analyze existing solutions** — check shared notes, past attempts, and "
@@ -154,8 +163,8 @@ def generate_coral_md(
         )
         step_offset = 2  # Plan starts at step 2
         research_back_reference = " (or **Step 1: Research** if you need a new direction)"
-        repeat_research_hint = (
-            "go back to **Step 1: Research** to find new techniques via web search, "
+        repeat_research_hint = "go back to **Step 1: Research** to find new techniques" + (
+            " via web search, " if config.agents.internet else ", "
         )
     else:
         workflow_summary = "plan → edit → eval → repeat"
@@ -181,15 +190,28 @@ def generate_coral_md(
         research_back_reference=research_back_reference,
         repeat_research_hint=repeat_research_hint,
     )
-
-    # Claude Code's native subagent guidance never applies: subagents, when on,
-    # go through `coral subagent` (see the manager section).
-    rendered = _without_subagents(rendered)
     return rendered + _team_sections(config, agent_id, single_agent, shared_dir, island_id)
 
 
+def _minimal_research_line(config: CoralConfig, shared_dir: str) -> str:
+    """Orient-step research hint; offline wording when agents have no internet."""
+    if not config.agents.research:
+        return ""
+    if config.agents.internet:
+        return (
+            " Before your first implementation and when changing direction, research the "
+            f"problem with the `deep-research` skill; track coverage in "
+            f"`{shared_dir}/notes/research/_coverage.md`."
+        )
+    return (
+        " Before your first implementation and when changing direction, study the problem "
+        "statement, the grader source and the files in your directory (you have no internet "
+        "access)."
+    )
+
+
 def _without_subagents(text: str) -> str:
-    """Drop the full guide's subagent guidance (agents.subagents is off)."""
+    """Drop the full guide's native subagent guidance from template text (never task text)."""
     lines = []
     for line in text.splitlines(keepends=True):
         line = line.replace(" Often pairs with the `librarian` subagent.", "")
@@ -223,6 +245,11 @@ def _team_sections(
         out += _MANAGER_SECTION.format(
             max_running=a.subagent_max_running,
             web="" if a.internet else " or the internet",
+            researcher_scope=(
+                " (including web research)"
+                if a.internet
+                else " from the code, grader and notes (no web access)"
+            ),
             run_budget=(
                 f"about ${a.subagent_run_budget_usd:g} for the whole team this run"
                 if a.subagent_run_budget_usd

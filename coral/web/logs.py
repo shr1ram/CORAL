@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import threading
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -204,42 +205,79 @@ class SessionMeta:
         }
 
 
-def parse_log_file(path: Path, offset: int = 0) -> tuple[list[LogTurn], int, SessionMeta | None]:
-    """Parse a Claude Code NDJSON log file into structured turns.
+_PI_STREAM_PREFIXES_B = tuple(p.encode() for p in _PI_STREAM_PREFIXES)
 
-    Args:
-        path: Path to the log file.
-        offset: Byte offset to start reading from (for incremental updates).
 
-    Returns:
-        (list of LogTurn, new byte offset, session metadata from result message)
+class LogParser:
+    """Incremental NDJSON log parser that keeps its turn state between reads.
+
+    ``read(path)`` consumes only the bytes added since the last read. Lines are
+    filtered on their raw bytes before decoding (Pi's per-token
+    ``message_update`` lines are most of a Pi log), and a trailing partial line
+    is left for the next read unless it already parses as JSON.
     """
-    if not path.exists():
-        return [], 0, None
 
-    file_size = path.stat().st_size
-    if offset >= file_size:
-        return [], offset, None
+    def __init__(self, offset: int = 0) -> None:
+        self.turns: list[LogTurn] = []
+        self.current_turn: LogTurn | None = None
+        self.turn_index = 0
+        self.session_meta: SessionMeta | None = None
+        self.offset = offset
 
-    turns: list[LogTurn] = []
-    current_turn: LogTurn | None = None
-    turn_index = 0
-    session_meta: SessionMeta | None = None
+    def read(self, path: Path, chunk_size: int = 8 << 20) -> None:
+        with open(path, "rb") as f:
+            f.seek(self.offset)
+            tail = b""  # bytes after the last newline, not yet consumed
+            while chunk := f.read(chunk_size):
+                data = tail + chunk
+                cut = data.rfind(b"\n") + 1
+                if cut:
+                    self._feed_bytes(data[:cut])
+                    self.offset += cut
+                tail = data[cut:]
+            if tail.strip():
+                # Complete JSON without a trailing newline: consume it; otherwise
+                # it is still being written, so leave it for the next read.
+                try:
+                    obj = json.loads(tail)
+                except json.JSONDecodeError:
+                    return
+                if isinstance(obj, dict):
+                    self.feed(obj)
+                self.offset += len(tail)
 
-    with open(path, encoding="utf-8", errors="replace") as f:
-        if offset > 0:
-            f.seek(offset)
-
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith(_PI_STREAM_PREFIXES):
+    def _feed_bytes(self, data: bytes) -> None:
+        for raw in data.split(b"\n"):
+            raw = raw.strip()
+            if not raw or raw.startswith(_PI_STREAM_PREFIXES_B):
                 continue
-
             try:
-                obj = json.loads(line)
+                obj = json.loads(raw)
             except json.JSONDecodeError:
                 continue
+            if isinstance(obj, dict):
+                self.feed(obj)
 
+    def result(self) -> list[LogTurn]:
+        turns = list(self.turns)
+        if self.current_turn and self.current_turn.entries:
+            # A copy: the cached parser keeps appending to the open turn while
+            # another request may still be serialising this one.
+            turns.append(
+                replace(
+                    self.current_turn,
+                    entries=list(self.current_turn.entries),
+                    usage=dict(self.current_turn.usage),
+                )
+            )
+        return turns
+
+    def feed(self, obj: dict[str, Any]) -> None:
+        turns = self.turns
+        current_turn = self.current_turn
+        turn_index = self.turn_index
+        session_meta = self.session_meta
+        try:
             msg_type = obj.get("type", "")
 
             if msg_type == "coral":
@@ -273,7 +311,7 @@ def parse_log_file(path: Path, offset: int = 0) -> tuple[list[LogTurn], int, Ses
                     current_turn = LogTurn(index=turn_index, timestamp=timestamp)
                     turn_index += 1
                     current_turn.entries.append(entry)
-                continue
+                return
 
             if msg_type == "message_end":
                 # Pi: one event per finished message. User messages are the
@@ -314,7 +352,7 @@ def parse_log_file(path: Path, offset: int = 0) -> tuple[list[LogTurn], int, Ses
                             timestamp=timestamp,
                         )
                     )
-                continue
+                return
 
             if msg_type == "system":
                 subtype = obj.get("subtype", "")
@@ -480,13 +518,54 @@ def parse_log_file(path: Path, offset: int = 0) -> tuple[list[LogTurn], int, Ses
                     current_turn = LogTurn(index=turn_index)
                     turn_index += 1
                 current_turn.entries.append(entry)
+        finally:
+            self.current_turn = current_turn
+            self.turn_index = turn_index
+            self.session_meta = session_meta
 
-    # Append the last turn
-    if current_turn and current_turn.entries:
-        turns.append(current_turn)
 
-    new_offset = path.stat().st_size
-    return turns, new_offset, session_meta
+def parse_log_file(path: Path, offset: int = 0) -> tuple[list[LogTurn], int, SessionMeta | None]:
+    """Parse a Claude Code or Pi NDJSON log file into structured turns.
+
+    Args:
+        path: Path to the log file.
+        offset: Byte offset to start reading from (for incremental updates).
+
+    Returns:
+        (list of LogTurn, new byte offset, session metadata from result message)
+    """
+    if not path.exists():
+        return [], 0, None
+    if offset >= path.stat().st_size:
+        return [], offset, None
+    parser = LogParser(offset)
+    parser.read(path)
+    return parser.result(), parser.offset, parser.session_meta
+
+
+_PARSERS: dict[str, tuple[int, LogParser]] = {}
+_PARSERS_LOCK = threading.Lock()
+
+
+def parse_log_cached(path: Path) -> tuple[list[LogTurn], SessionMeta | None]:
+    """Like ``parse_log_file`` from offset 0, but reads only bytes added since the last call.
+
+    Parsers are cached per path; a file that shrank or was replaced (new inode)
+    is re-parsed from the start. Safe to call from worker threads.
+    """
+    key = str(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return [], None
+    with _PARSERS_LOCK:
+        inode, parser = _PARSERS.get(key, (None, None))
+        if parser is None or inode != stat.st_ino or stat.st_size < parser.offset:
+            parser = LogParser()
+            _PARSERS[key] = (stat.st_ino, parser)
+        if stat.st_size > parser.offset:
+            parser.read(path)
+        return parser.result(), parser.session_meta
 
 
 def list_log_files(coral_dir: Path) -> dict[str, list[dict[str, Any]]]:
@@ -524,46 +603,79 @@ def list_log_files(coral_dir: Path) -> dict[str, list[dict[str, Any]]]:
     return agents
 
 
-def live_state(path: Path, tail_bytes: int = 4 << 20) -> dict[str, Any] | None:
+_ASSISTANT_END = b'{"type":"message_end","message":{"role":"assistant"'
+# path -> (inode, bytes scanned, context tokens of the last finished model call)
+_CONTEXT: dict[str, tuple[int, int, int]] = {}
+_CONTEXT_LOCK = threading.Lock()
+
+
+def live_state(path: Path, tail_bytes: int = 256 << 10) -> dict[str, Any] | None:
     """What a Pi agent is doing right now, from the end of its log.
 
-    Returns ``{"state": ..., "since": iso}`` where state is ``waiting`` (request
-    sent, no tokens back yet: the model is reading the prompt), ``streaming``
-    (with the partial thinking/text so far), ``tool`` (running a tool), or
-    ``idle``. Only the last ``tail_bytes`` of the file are read.
+    Returns ``{"state": ..., "since": iso, "context_tokens": n}`` where state is
+    ``waiting`` (request sent, no tokens back yet: the model is reading the
+    prompt), ``streaming`` (with the partial thinking/text so far), ``tool``
+    (running a tool), ``between`` or ``idle``. Reads the last ``tail_bytes``,
+    widening the window only while it holds no complete event (a single
+    streaming update can be large); the context size comes from a per-file
+    cache that only scans bytes added since the previous call.
     """
     try:
         size = path.stat().st_size
         with open(path, "rb") as f:
-            f.seek(max(0, size - tail_bytes))
-            lines = f.read().decode("utf-8", errors="replace").splitlines()
+            window = tail_bytes
+            while True:
+                f.seek(max(0, size - window))
+                lines = f.read(window).decode("utf-8", errors="replace").splitlines()
+                state = _classify(lines)
+                if state is not None or window >= size or window >= 64 << 20:
+                    break
+                window *= 4
     except OSError:
         return None
-
-    state = _classify(lines)
-    state["context_tokens"] = _last_context_tokens(lines)
-    if not state["context_tokens"] and size > tail_bytes:
-        # A long stream can push the last finished message out of the tail.
-        with open(path, encoding="utf-8", errors="replace") as f:
-            state["context_tokens"] = _last_context_tokens(
-                [line for line in f if line.startswith('{"type":"message_end"')]
-            )
+    state = state or {"state": "idle", "since": ""}
+    state["context_tokens"] = _context_tokens(path)
     return state
 
 
-def _last_context_tokens(lines: list[str]) -> int:
-    """Prompt + output tokens of the last finished model call (the next prompt is at least this)."""
-    for line in reversed(lines):
-        if line.startswith('{"type":"message_end","message":{"role":"assistant"'):
-            try:
-                usage = json.loads(line)["message"].get("usage") or {}
-            except (json.JSONDecodeError, KeyError):
-                continue
-            return int(usage.get("input", 0) + usage.get("cacheRead", 0) + usage.get("output", 0))
-    return 0
+def _context_tokens(path: Path, chunk_size: int = 8 << 20) -> int:
+    """Prompt + output tokens of the last finished assistant call, scanning only new bytes."""
+    key = str(path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return 0
+    with _CONTEXT_LOCK:
+        inode, scanned, tokens = _CONTEXT.get(key, (stat.st_ino, 0, 0))
+        if inode != stat.st_ino or stat.st_size < scanned:
+            scanned, tokens = 0, 0
+        with open(path, "rb") as f:
+            f.seek(scanned)
+            carry = b""
+            while chunk := f.read(chunk_size):
+                data = carry + chunk
+                cut = data.rfind(b"\n") + 1
+                complete, carry = data[:cut], data[cut:]
+                scanned += cut
+                pos = complete.rfind(b"\n" + _ASSISTANT_END)
+                if pos < 0 and complete.startswith(_ASSISTANT_END):
+                    pos = -1
+                elif pos < 0:
+                    continue
+                line_end = complete.find(b"\n", pos + 1)
+                line = complete[pos + 1 : line_end if line_end >= 0 else None]
+                try:
+                    usage = json.loads(line)["message"].get("usage") or {}
+                    tokens = int(
+                        usage.get("input", 0) + usage.get("cacheRead", 0) + usage.get("output", 0)
+                    )
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    pass
+        _CONTEXT[key] = (stat.st_ino, scanned, tokens)
+        return tokens
 
 
-def _classify(lines: list[str]) -> dict[str, Any]:
+def _classify(lines: list[str]) -> dict[str, Any] | None:
     for line in reversed(lines):
         line = line.strip()
         if not line.startswith('{"type":"'):
@@ -593,4 +705,4 @@ def _classify(lines: list[str]) -> dict[str, Any]:
         if kind in ("message_start", "message_end", "tool_execution_end", "turn_start", "turn_end"):
             # Between model calls: tool results or a prompt are about to be sent.
             return {"state": "between", "since": ""}
-    return {"state": "idle", "since": ""}
+    return None

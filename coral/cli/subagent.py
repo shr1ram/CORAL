@@ -1,4 +1,8 @@
-"""`coral subagent`: delegate work to Claude subagents (agents.subagents)."""
+"""`coral subagent`: delegate work to Claude subagents (agents.subagents).
+
+Requests go to subagents/requests/<agent>/ and results are read from the
+broker's mirror; the broker re-checks every request (coral/hub/subagents.py).
+"""
 
 from __future__ import annotations
 
@@ -57,6 +61,9 @@ def cmd_subagent(args: argparse.Namespace) -> None:
         sys.exit(1)
     timeout = int(agents.get("subagent_timeout", 900)) + 120
     agent_id = read_agent_id()
+    if agent_id == "unknown":
+        print("Error: run `coral subagent` from inside your worktree.", file=sys.stderr)
+        sys.exit(1)
 
     if args.action == "list":
         mine = [r for r in pending_requests(coral_dir, island_id) if r.agent_id == agent_id]

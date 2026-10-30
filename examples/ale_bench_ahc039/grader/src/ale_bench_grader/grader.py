@@ -7,7 +7,9 @@ a run; evaluate the final best solution with ALE-Bench's private_eval afterwards
 from __future__ import annotations
 
 import os
+import shutil
 from collections import Counter
+from pathlib import Path
 
 from coral.grader import TaskGrader
 from coral.types import ScoreBundle
@@ -19,16 +21,42 @@ class Grader(TaskGrader):
     _session = None
 
     def _get_session(self):
-        # One ALE-Bench session per grader worker: starting one takes ~25 s
-        # (problem download + tool build), evaluating takes seconds.
+        # CORAL runs each eval in a fresh process, so the session is rebuilt
+        # every time. ale_bench.start() compiles the problem's Rust tools in
+        # Docker (~20 s); keep the compiled binaries under the private dir
+        # (agents cannot read it) and copy them in instead of rebuilding.
         if Grader._session is None:
+            import importlib
+
             import ale_bench
 
-            Grader._session = ale_bench.start(
-                problem_id=self.args["problem_id"],
-                lite_version=self.args.get("lite_version", False),
-                num_workers=self.args.get("num_workers", 4),
-            )
+            # ale_bench re-exports the `start` function, which shadows the module name.
+            ale_start = importlib.import_module("ale_bench.start")
+
+            cache = Path(self.private_dir) / "ale_bench_tools" / self.args["problem_id"]
+            build = ale_start.build_rust_tools
+
+            def build_or_reuse(tools_dir: Path) -> None:
+                if (cache / ".built").exists():
+                    shutil.copytree(cache, tools_dir / "target" / "release", dirs_exist_ok=True)
+                    return
+                build(tools_dir)
+                release = tools_dir / "target" / "release"
+                cache.mkdir(parents=True, exist_ok=True)
+                for binary in release.iterdir():
+                    if binary.is_file() and os.access(binary, os.X_OK):
+                        shutil.copy2(binary, cache / binary.name)
+                (cache / ".built").touch()
+
+            ale_start.build_rust_tools = build_or_reuse
+            try:
+                Grader._session = ale_bench.start(
+                    problem_id=self.args["problem_id"],
+                    lite_version=self.args.get("lite_version", False),
+                    num_workers=self.args.get("num_workers", 4),
+                )
+            finally:
+                ale_start.build_rust_tools = build
         return Grader._session
 
     def evaluate(self) -> ScoreBundle:

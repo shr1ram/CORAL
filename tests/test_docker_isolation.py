@@ -154,6 +154,7 @@ def test_cmd_start_forces_isolation_despite_override(monkeypatch, tmp_path):
     base = CoralConfig()
     base.task.name = "t"  # mandatory fields; needed for the override-merge to resolve
     base.task.description = "t"
+    base.agents.internet = True  # not under test; skips the offline sandbox check
     base.run.session = "local"  # inner-process mode; skip the docker/tmux dispatch
     monkeypatch.setattr(start_mod.CoralConfig, "from_yaml", classmethod(lambda cls, path: base))
     monkeypatch.setattr(start_mod, "in_tmux", lambda: False)

@@ -49,9 +49,13 @@ def test_minimal_instructions_are_the_default_and_short():
         "coral heartbeat",
     ):
         assert needed in md, needed
-    # The research step follows agents.research (on by default).
-    assert "deep-research` skill;" in md
-    assert "deep-research` skill;" not in generate_coral_md(_config(research=False), "alpha")
+    # The research step follows agents.research (on by default), worded for agents.internet.
+    assert "you have no internet access" in md and "deep-research` skill;" not in md
+    online = generate_coral_md(_config(internet=True), "alpha")
+    assert "deep-research` skill;" in online
+    assert "deep-research` skill;" not in generate_coral_md(
+        _config(internet=True, research=False), "alpha"
+    )
 
 
 def test_minimal_instructions_keep_messaging_section_in_cooperate_mode():
@@ -94,6 +98,23 @@ def test_parse_reply_takes_last_block_title_status_recall_and_typed_messages():
     assert reply.messages == [
         ("finding", "all", "merging clusters beats single boxes"),
         ("warning", "beta", "your timer is off by 0.2s"),
+    ]
+
+
+def test_parse_reply_reports_malformed_keyword_lines():
+    reply = oneshot.parse_reply(
+        "- **TITLE:** bulleted title\n"
+        "STATUS: fine\n"
+        "FINDING: no recipient\n"
+        "> WARNING beta: quoted\n"
+        "Findings are below.\n"
+        "```cpp\nint main() {}\n```\n"
+    )
+    assert reply.status == "fine" and reply.title == "one-shot attempt"
+    assert reply.malformed == [
+        "- **TITLE:** bulleted title",
+        "FINDING: no recipient",
+        "> WARNING beta: quoted",
     ]
 
 
@@ -157,8 +178,15 @@ def test_build_prompt_includes_context_program_and_cooperation():
         "one of: beta",
     ):
         assert needed in prompt, needed
+    assert "\nTITLE: <" in prompt and "\nFINDING all: <" in prompt  # plain, unbulleted lines
     solo = _prompt()
     assert "FINDING" not in solo and "RECALL" not in solo and "STATUS:" in solo
+    assert "last attempt failed" not in solo
+
+
+def test_prompt_reports_last_failure():
+    prompt = _prompt(last_failure="It was cut off at the 100-token limit (finish_reason=length)")
+    assert "## Your last attempt failed" in prompt and "finish_reason=length" in prompt
 
 
 def test_prompt_reports_undelivered_messages():
@@ -175,6 +203,7 @@ def test_chat_stream_collects_reasoning_text_and_usage(capsys):
         {"choices": [{"delta": {"reasoning_content": "think "}}]},
         {"choices": [{"delta": {"reasoning_content": "more"}}]},
         {"choices": [{"delta": {"content": "TITLE: x\n```cpp\nint main(){}\n```"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
         {
             "choices": [],
             "usage": {
@@ -201,7 +230,7 @@ def test_chat_stream_collects_reasoning_text_and_usage(capsys):
     server = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        reasoning, text, usage = oneshot.chat_stream(
+        reasoning, text, usage, finish = oneshot.chat_stream(
             f"http://127.0.0.1:{server.server_port}/v1", "flint", "hi", 100, 1.0
         )
     finally:
@@ -210,6 +239,7 @@ def test_chat_stream_collects_reasoning_text_and_usage(capsys):
     assert reasoning == "think more"
     assert oneshot.parse_reply(text).program == "int main(){}\n"
     assert usage == {"input": 400, "output": 50, "cacheRead": 600, "cacheWrite": 0}
+    assert finish == "stop"
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert events[0]["type"] == "message_start"
 
@@ -273,19 +303,62 @@ def test_agentic_without_sandbox_and_internet_off_refuses_to_start(tmp_path):
     AgentManager(oneshot)._start_sandbox_if_enabled()  # one-shot agents have no tools
 
 
-def test_direction_rotates_from_history_and_pivots_on_plateau():
+def test_direction_rotates_and_pivots_against_the_team_best():
+    from types import SimpleNamespace as A
+
+    def history(scores, minimize=False):
+        return oneshot.direction_history(
+            [A(agent_id=agent, score=score) for agent, score in scores], "alpha", minimize
+        )
+
     first = oneshot.choose_direction([], "alpha", minimize=False)
-    second = oneshot.choose_direction([10.0], "alpha", minimize=False)
+    second = oneshot.choose_direction(history([("alpha", 10.0)]), "alpha", minimize=False)
     assert first in oneshot.DIRECTIONS and second in oneshot.DIRECTIONS and first != second
-    # three attempts after the best that don't beat it -> pivot
-    pivot = oneshot.choose_direction([10.0, 50.0, 40.0, 45.0, 50.0], "alpha", minimize=False)
-    assert "substantially different" in pivot
-    # an improvement inside the window -> keep rotating
-    assert "substantially" not in oneshot.choose_direction(
-        [10.0, 50.0, 40.0, 60.0, 45.0], "alpha", minimize=False
-    )
+    # beta sets the bar; alpha's three attempts below it -> pivot
+    stuck = [("alpha", 10.0), ("beta", 50.0), ("alpha", 40.0), ("alpha", 45.0), ("alpha", 30.0)]
+    assert "substantially different" in oneshot.choose_direction(history(stuck), "alpha", False)
+    # pivot once, then rotate again; pivot again after three more misses
+    more = [*stuck, ("alpha", 20.0)]
+    assert "substantially" not in oneshot.choose_direction(history(more), "alpha", False)
+    more += [("alpha", 20.0), ("alpha", None)]
+    assert "substantially" in oneshot.choose_direction(history(more), "alpha", False)
+    # beating the team best at the time resets the streak
+    beat = [("beta", 50.0), ("alpha", 40.0), ("alpha", 60.0), ("alpha", 45.0), ("alpha", 50.0)]
+    assert "substantially" not in oneshot.choose_direction(history(beat), "alpha", False)
     # minimize: lower is better
-    assert "substantially" in oneshot.choose_direction([5.0, 9.0, 8.0, 7.0], "alpha", minimize=True)
+    low = [("alpha", 5.0), ("alpha", 9.0), ("alpha", 8.0), ("alpha", 7.0)]
+    assert "substantially" in oneshot.choose_direction(history(low, True), "alpha", True)
+
+
+def test_send_messages_validates_recipients_in_process(tmp_path):
+    from coral.hub.messages import list_messages
+
+    coral_dir = tmp_path / ".coral"
+    (coral_dir / "public").mkdir(parents=True)
+    undelivered = oneshot.send_messages(
+        coral_dir,
+        "alpha",
+        ["alpha", "beta"],
+        [
+            ("finding", "all", "notches help"),
+            ("warning", "alpha", "self"),
+            ("request", "zed", "who?"),
+            ("reply", "beta", "x" * 5000),
+        ],
+        None,
+    )
+    assert [(m.kind, m.to) for m in list_messages(coral_dir)] == [("finding", "all")]
+    assert len(undelivered) == 3
+    assert "yourself" in undelivered[0] and "unknown agent 'zed'" in undelivered[1]
+    assert "keep it under" in undelivered[2]
+
+
+def test_eval_failure_notes():
+    assert "no change" in oneshot._eval_failure("Error: Nothing to commit — no changes detected.")
+    assert "still being" in oneshot._eval_failure(
+        "Error: You already have 1 pending attempt(s) (limit: 1)."
+    )
+    assert oneshot._eval_failure("Error: grader crashed\nTraceback").endswith("grader crashed")
 
 
 def test_manager_sends_no_heartbeats_to_oneshot_agents(tmp_path, monkeypatch):
@@ -314,11 +387,13 @@ def test_manager_sends_no_heartbeats_to_oneshot_agents(tmp_path, monkeypatch):
     interrupted = []
     monkeypatch.setattr(mgr, "_get_seen_attempts", lambda: next(seen, {"h1"}))
     monkeypatch.setattr(mgr, "_filter_scored", lambda a: a)
-    monkeypatch.setattr(
-        mgr,
-        "_read_latest_attempt",
-        lambda new, agent_id=None: {"agent_id": "alpha", "score": 1.0, "commit_hash": "abc"},
-    )
+    read = []
+
+    def scored(files):
+        read.append(files)
+        return [{"agent_id": "alpha", "score": 1.0, "commit_hash": "abc"}]
+
+    monkeypatch.setattr(mgr, "_read_scored_attempts", scored)
     monkeypatch.setattr(mgr, "_auto_stop_reason_from_current_state", lambda: None)
     monkeypatch.setattr(mgr, "_auto_stop_reason_from_attempt", lambda a: None)
     monkeypatch.setattr(mgr, "_get_eval_count", lambda: 1)
@@ -334,4 +409,4 @@ def test_manager_sends_no_heartbeats_to_oneshot_agents(tmp_path, monkeypatch):
 
     mgr.monitor_loop(check_interval=0)
 
-    assert interrupted == []
+    assert read and interrupted == []

@@ -258,7 +258,9 @@ class AgentConfig:
     mode: str = "compete"
     # "minimal": a short CORAL.md and short heartbeat prompts (task, how to eval,
     # where shared state lives). "full": the original long-form guide with
-    # roles, research workflow and note-writing conventions.
+    # roles, research workflow and note-writing conventions. "full" intentionally
+    # differs from upstream CORAL: its Claude Code native subagent guidance is
+    # removed (subagents only exist as `coral subagent`, see agents.subagents).
     instructions: str = "minimal"
     # "agentic": each agent is a coding-agent CLI (agents.runtime) that edits,
     # tests and evals with tools. "oneshot": each attempt is one model call

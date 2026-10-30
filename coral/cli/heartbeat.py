@@ -92,6 +92,7 @@ def _cmd_heartbeat_set(args: argparse.Namespace) -> None:
         PROTECTED_LOCAL,
         read_agent_heartbeat,
         read_global_heartbeat,
+        run_default_prompt,
         write_agent_heartbeat,
         write_global_heartbeat,
     )
@@ -163,7 +164,7 @@ def _cmd_heartbeat_set(args: argparse.Namespace) -> None:
             new_action: dict = {
                 "name": name,
                 "every": every,
-                "prompt": prompt if prompt is not None else DEFAULT_PROMPTS.get(name, ""),
+                "prompt": prompt if prompt is not None else run_default_prompt(coral_dir, name),
                 "trigger": trigger,
                 "options": {"epsilon": epsilon} if epsilon is not None else {},
             }
@@ -194,7 +195,7 @@ def _cmd_heartbeat_set(args: argparse.Namespace) -> None:
             new_action = {
                 "name": name,
                 "every": every,
-                "prompt": prompt if prompt is not None else DEFAULT_PROMPTS.get(name, ""),
+                "prompt": prompt if prompt is not None else run_default_prompt(coral_dir, name),
                 "trigger": trigger,
                 "options": {"epsilon": epsilon} if epsilon is not None else {},
             }

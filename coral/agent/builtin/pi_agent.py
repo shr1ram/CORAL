@@ -29,7 +29,9 @@ from coral.workspace.repo import _clean_env
 logger = logging.getLogger(__name__)
 
 _PI_TOOLS = "read,bash,edit,write,grep,find,ls"
-# agents.subagents: the agent only manages, so it gets no file-editing tools.
+# agents.subagents: the agent should only manage, so it gets no file-editing tools.
+# This is a nudge, not a boundary: bash stays (coral subagent/eval/notes need it),
+# and bash can still edit files. The sandbox, not this list, is what contains it.
 _PI_MANAGER_TOOLS = "read,bash,grep,find,ls"
 
 

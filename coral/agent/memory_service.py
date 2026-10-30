@@ -13,7 +13,11 @@ never holds more than one server slot:
 - state of play: every ``memory_state_every`` new items, a short team summary
   the librarian also draws on.
 
-Agents never wait for this: the worker shows whatever brief is ready.
+Agents never wait for this: the worker shows whatever brief is ready. A call
+that fails or returns nothing is retried with backoff; after MAX_FAILURES the
+writer stores a plain item built from the attempt, and a brief or state of play
+waits for its next trigger. Attempts with no code change or no score get such a
+plain item straight away, without a model call.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import logging
 import re
 import subprocess
 import threading
+import time
 import urllib.request
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -45,8 +50,10 @@ from coral.hub.status import read_board
 
 logger = logging.getLogger(__name__)
 
-SHOW_ALL_ITEMS = 40  # below this the librarian sees every item
-BM25_TOP = 20
+SHOW_ALL_ITEMS = 15  # up to this many items the librarian sees every one
+BM25_TOP = 12
+MAX_TOKENS = 6000  # the model reasons first; 1500 left no room for the answer
+MAX_FAILURES = 3
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 WRITER_PROMPT = """You maintain a coding team's shared memory. One agent just submitted an attempt;
@@ -99,21 +106,40 @@ Keep each fact close to its original wording and cite its source as [id, agent, 
 advice of your own. Reply with the facts as a bullet list only."""
 
 
-def chat_once(base_url: str, model: str, prompt: str, max_tokens: int = 1500) -> str:
+def chat_once(base_url: str, model: str, prompt: str, max_tokens: int = MAX_TOKENS) -> str:
+    """One streamed completion; raises if it is empty (e.g. cut off while reasoning)."""
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0.3,
+        "stream": True,
     }
     request = urllib.request.Request(
         base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "Authorization": "Bearer local"},
     )
-    with urllib.request.urlopen(request, timeout=600) as response:
-        data = json.load(response)
-    return (data["choices"][0]["message"].get("content") or "").strip()
+    parts, finish = [], None
+    # Streaming keeps the connection alive while the model reasons, so a long
+    # reply is not mistaken for a hung server.
+    with urllib.request.urlopen(request, timeout=3600) as response:
+        for raw in response:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            for choice in json.loads(data).get("choices") or []:
+                parts.append((choice.get("delta") or {}).get("content") or "")
+                finish = choice.get("finish_reason") or finish
+    text = "".join(parts).strip()
+    if finish == "length":
+        logger.warning("Memory call hit max_tokens=%d (finish_reason=length)", max_tokens)
+    if not text:
+        raise RuntimeError(f"empty reply (finish_reason={finish})")
+    return text
 
 
 def _parse_json(text: str) -> dict[str, Any] | None:
@@ -129,6 +155,14 @@ def _parse_json(text: str) -> dict[str, Any] | None:
 
 def _best(scores: list[float], minimize: bool) -> float | None:
     return (min(scores) if minimize else max(scores)) if scores else None
+
+
+def _parse_item(text: str) -> dict[str, Any]:
+    """Writer reply -> item fields; raises if it is not usable JSON."""
+    fields = _parse_json(text)
+    if not fields or not (fields.get("approach") or fields.get("lesson")):
+        raise ValueError(f"writer reply is not item JSON: {text[:200]!r}")
+    return fields
 
 
 class MemoryService:
@@ -153,6 +187,8 @@ class MemoryService:
         self.target = (config.agents.runtime_options or {}).get("target", "")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # job key -> (failures, monotonic time before which it is not retried)
+        self._failures: dict[tuple, tuple[int, float]] = {}
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._loop, name="coral-memory", daemon=True)
@@ -176,30 +212,64 @@ class MemoryService:
                 self._stop.wait(self.poll)
 
     def step(self, island_id: str | None = None) -> bool:
-        """Do the most urgent pending job; True if one was done."""
+        """Do the most urgent pending job; True if one was done (or attempted)."""
+        attempts = sorted(read_attempts(self.coral_dir, island_id), key=lambda a: a.timestamp)
+        items = read_items(self.coral_dir, island_id)
+        board = read_board(self.coral_dir, island_id)
         return (
-            self._write_next_item(island_id)
-            or self._write_next_brief(island_id)
-            or self._write_state(island_id)
+            self._write_next_item(island_id, attempts, items, board)
+            or self._write_next_brief(island_id, attempts, items, board)
+            or self._write_state(island_id, items, board)
         )
+
+    # --- failures ----------------------------------------------------------
+
+    def _ready(self, key: tuple) -> bool:
+        """False while a failed job waits out its backoff, or after it has given up."""
+        count, retry_at = self._failures.get(key, (0, 0.0))
+        return count < MAX_FAILURES and time.monotonic() >= retry_at
+
+    def _call(self, key: tuple, prompt: str, parse: Callable[[str], Any] = str) -> Any | None:
+        """Run one model call for ``key``; None on failure (recorded for backoff)."""
+        try:
+            result = parse(self.llm(prompt))
+        except Exception as e:
+            count = self._failures.get(key, (0, 0.0))[0] + 1
+            self._failures[key] = (count, time.monotonic() + min(60 * count, 600))
+            logger.warning("Memory %s failed (%d/%d): %s", key[0], count, MAX_FAILURES, e)
+            return None
+        self._failures.pop(key, None)
+        return result
 
     # --- writer ------------------------------------------------------------
 
-    def _write_next_item(self, island_id: str | None) -> bool:
-        attempts = sorted(read_attempts(self.coral_dir, island_id), key=lambda a: a.timestamp)
-        done = {i["id"] for i in read_items(self.coral_dir, island_id)}
+    def _write_next_item(self, island_id, attempts, items, board) -> bool:
+        done = {i["id"] for i in items}
         todo = [a for a in attempts if a.status != "pending" and a.commit_hash not in done]
-        if not todo:
-            return False
-        attempt = todo[0]
+        for attempt in todo:
+            key = ("writer", island_id, attempt.commit_hash)
+            count = self._failures.get(key, (0, 0.0))[0]
+            if count < MAX_FAILURES and not self._ready(key):
+                continue  # backing off; try the next attempt meanwhile
+            diff = self._diff(attempt.parent_hash, attempt.commit_hash)
+            fields = None
+            if count < MAX_FAILURES and attempt.score is not None and diff != "(no change)":
+                fields = self._call(
+                    key, self._writer_prompt(attempt, attempts, items, board, diff), _parse_item
+                )
+                if fields is None and self._failures.get(key, (0, 0.0))[0] < MAX_FAILURES:
+                    return True  # retry later
+            self._failures.pop(key, None)
+            self._store_item(attempt, fields, diff, island_id)
+            return True
+        return False
+
+    def _writer_prompt(self, attempt, attempts, items, board, diff: str) -> str:
         earlier = [a for a in attempts if a.timestamp < attempt.timestamp and a.score is not None]
         agent_best = _best(
             [a.score for a in earlier if a.agent_id == attempt.agent_id], self.minimize
         )
-        team_best = _best([a.score for a in earlier], self.minimize)
-        board = read_board(self.coral_dir, island_id)
-        items = read_items(self.coral_dir, island_id)
-        prompt = WRITER_PROMPT.format(
+        return WRITER_PROMPT.format(
             task=self.config.task.name,
             agent=attempt.agent_id,
             status=(board.get(attempt.agent_id) or {}).get("status", ""),
@@ -207,12 +277,22 @@ class MemoryService:
             score=attempt.score,
             outcome=attempt.status,
             agent_best=agent_best,
-            team_best=team_best,
+            team_best=_best([a.score for a in earlier], self.minimize),
             feedback=(attempt.feedback or "")[:1500],
-            diff=self._diff(attempt.parent_hash, attempt.commit_hash)[:6000],
+            diff=diff[:6000],
             tags=", ".join(known_tags(items)[:40]) or "(none yet)",
         )
-        fields = _parse_json(self.llm(prompt)) or {}
+
+    def _store_item(self, attempt, fields: dict | None, diff: str, island_id) -> None:
+        """Write the item; without model fields, a plain one built from the attempt."""
+        if fields is None:
+            if diff == "(no change)":
+                result = "no code change"
+            elif attempt.score is None:
+                result = "no score: " + (attempt.feedback or "").strip().split("\n")[0][:300]
+            else:
+                result = f"score {attempt.score}"
+            fields = {"approach": attempt.title, "result": result, "tags": []}
         write_item(
             self.coral_dir,
             {
@@ -230,7 +310,6 @@ class MemoryService:
             },
             island_id,
         )
-        return True
 
     def _diff(self, parent: str | None, commit: str) -> str:
         if not parent:
@@ -238,71 +317,98 @@ class MemoryService:
         cmd = ["git", "-C", str(self.repo_dir), "diff", parent, commit]
         if self.target:
             cmd += ["--", self.target]
-        out = subprocess.run(cmd, capture_output=True, text=True)
+        out = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
         return out.stdout or "(no change)"
 
     # --- state of play -----------------------------------------------------
 
-    def _write_state(self, island_id: str | None) -> bool:
-        items = read_items(self.coral_dir, island_id)
+    def _write_state(self, island_id, items, board) -> bool:
         state = read_state(self.coral_dir, island_id) or {}
         every = self.config.agents.memory_state_every
         if not items or len(items) - state.get("n_items", 0) < every:
             return False
-        board = read_board(self.coral_dir, island_id)
-        text = self.llm(
+        key = ("state", island_id, len(items))
+        if not self._ready(key):
+            return False
+        text = self._call(
+            key,
             STATE_PROMPT.format(
                 task=self.config.task.name,
                 items="\n".join(item_text(i) for i in items[-60:]),
                 board="\n".join(f"- {a}: {s.get('status', '')}" for a, s in board.items()) or "-",
+            ),
+        )
+        if text is not None:
+            write_state(
+                self.coral_dir,
+                {"text": text, "n_items": len(items), "created_at": datetime.now(UTC).isoformat()},
+                island_id,
             )
-        )
-        write_state(
-            self.coral_dir,
-            {"text": text, "n_items": len(items), "created_at": datetime.now(UTC).isoformat()},
-            island_id,
-        )
         return True
 
     # --- librarian ---------------------------------------------------------
 
-    def _write_next_brief(self, island_id: str | None) -> bool:
-        items = read_items(self.coral_dir, island_id)
+    def _write_next_brief(self, island_id, attempts, items, board) -> bool:
+        """Brief the agent whose status, recall or newest attempt changed longest ago."""
         if not items:
             return False
-        board = read_board(self.coral_dir, island_id)
-        for agent, status in sorted(board.items(), key=lambda kv: kv[1].get("updated_at", "")):
+        newest = {}
+        for i in items:
+            newest[i.get("agent")] = i  # items are oldest first
+        agents = set(board) | {a for a in newest if a}
+        pending = []
+        for agent in agents:
+            status = board.get(agent) or {}
+            own = newest.get(agent)
+            trigger = f"{status.get('updated_at', '')}|{own['id'] if own else ''}"
             brief = read_brief(self.coral_dir, agent, island_id) or {}
-            if brief.get("for_updated_at", "") >= status.get("updated_at", ""):
+            if brief.get("trigger") == trigger:
                 continue
-            self._brief(agent, status, items, island_id)
-            return True
-        return False
+            key = ("brief", island_id, agent, trigger)
+            if self._ready(key):
+                changed = max(status.get("updated_at", ""), (own or {}).get("created_at", ""))
+                pending.append((changed, agent, status, trigger, key))
+        if not pending:
+            return False
+        _, agent, status, trigger, key = min(pending)
+        self._brief(agent, status, trigger, key, attempts, items, island_id)
+        return True
 
-    def _brief(self, agent: str, status: dict, items: list[dict], island_id: str | None) -> None:
+    def _brief(self, agent, status, trigger, key, attempts, items, island_id) -> None:
+        from coral.agent.oneshot import choose_direction, direction_history
+
         candidates = self.candidates(agent, status, items)
         own = [i for i in items if i.get("agent") == agent]
-        last = own[-1] if own else None
         recall = status.get("recall", "")
         state = read_state(self.coral_dir, island_id) or {}
-        text = self.llm(
+        # The direction the agent's next attempt will get (status holds the last one).
+        direction = choose_direction(
+            direction_history(attempts, agent, self.minimize), agent, self.minimize
+        )
+        text = self._call(
+            key,
             LIBRARIAN_PROMPT.format(
                 agent=agent,
                 task=self.config.task.name,
                 status=status.get("status", ""),
-                direction=status.get("direction", ""),
+                direction=direction,
                 recall=f'Its question for you: "{recall}"\n' if recall else "",
-                last=item_text(last) if last else "no attempts yet",
+                last=item_text(own[-1]) if own else "no attempts yet",
                 state=state.get("text", "(none yet)"),
                 items="\n".join(item_text(i) for i in candidates),
                 answer=", and the answer to its question if memory has one" if recall else "",
-            )
+            ),
         )
+        if text is None:
+            return
         write_brief(
             self.coral_dir,
             agent,
             {
                 "text": text,
+                "trigger": trigger,
                 "for_updated_at": status.get("updated_at", ""),
                 "recall": recall,
                 "items_considered": [i["id"] for i in candidates],

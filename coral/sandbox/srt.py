@@ -72,10 +72,26 @@ class SrtSandbox:
         self.cfg = cfg
         self._proxy: AllowAllProxy | None = None
         self._internet = True
+        # Loopback ports agents may reach through the proxy when
+        # agents.internet is off (None: any loopback port). validate() seeds
+        # it from the model server's port; the manager may override it.
+        self.allowed_ports: set[int] | None = None
 
     def validate(self, agents: AgentConfig) -> None:
         ensure_sandbox_supported(agents)
         self._internet = agents.internet
+        if not agents.internet and self.cfg.network == "allowlist":
+            external = [d for d in self.cfg.allowed_domains if loopback_literal(d) is None]
+            if external:
+                raise RuntimeError(
+                    "agents.internet is false but agents.sandbox.allowed_domains lists "
+                    f"external hosts ({', '.join(external)}). Remove them, or turn "
+                    "agents.internet on."
+                )
+        if not agents.internet:
+            port = _loopback_port((agents.runtime_options or {}).get("base_url"))
+            if port is not None:
+                self.allowed_ports = {port}
 
     def start(self) -> None:
         """Start the allow-all proxy backing ``network="open"``. Idempotent.
@@ -84,9 +100,16 @@ class SrtSandbox:
         filtering proxies per agent.
         """
         if self.cfg.network == "open" and self._proxy is None:
-            self._proxy = AllowAllProxy(allow_host=None if self._internet else is_loopback_host)
+            self._proxy = AllowAllProxy(
+                allow_host=None if self._internet else is_loopback_host,
+                allowed_ports=None if self._internet else self.allowed_ports,
+            )
             port = self._proxy.start()
-            policy = "allow-all" if self._internet else "loopback only, agents.internet=false"
+            if self._internet:
+                policy = "allow-all"
+            else:
+                ports = sorted(self.allowed_ports) if self.allowed_ports else "any port"
+                policy = f"loopback only ({ports}), agents.internet=false"
             logger.info(f"Sandbox network proxy ({policy}) on 127.0.0.1:{port}")
 
     def stop(self) -> None:
@@ -113,6 +136,10 @@ class SrtSandbox:
             proxy_port=self._proxy.port if self._proxy else None,
             sibling_worktrees=ctx.sibling_worktrees,
         )
+        # srt cannot always protect a path that does not exist yet (bwrap
+        # binds existing paths), so create the subagent dirs it must deny.
+        for path in _subagent_deny_writes(ctx.worktree_path, ctx.coral_dir, ctx.sibling_worktrees):
+            Path(path).mkdir(parents=True, exist_ok=True)
         settings_dir = ctx.coral_dir / "private" / "sandbox"
         settings_dir.mkdir(parents=True, exist_ok=True)
         settings_path = settings_dir / f"{ctx.agent_id}.json"
@@ -363,6 +390,36 @@ def _tls_cert_env() -> dict[str, str]:
     return {}
 
 
+def _subagent_deny_writes(
+    worktree_path: Path, coral_dir: Path, sibling_worktrees: list[Path]
+) -> list[str]:
+    """Subagent paths this agent must not write although .coral/ is writable.
+
+    The broker trusts a request's directory name as the requesting agent
+    (subagents/requests/<agent>/) and the CLI reads results from
+    subagents/results/, so deny every other known agent's request dir and the
+    results mirror, in every island root. Agents are named from the
+    manager's roster plus the worktrees on disk; an agent unknown to both
+    (not yet created, in another island) is still refused by the broker
+    unless its worktree exists.
+    """
+    own = worktree_path.name
+    agents_dir = worktree_path.parent
+    names = {p.name for p in sibling_worktrees}
+    if agents_dir.is_dir():
+        names.update(p.name for p in agents_dir.iterdir() if p.is_dir())
+    names.discard(own)
+    islands = coral_dir / "islands"
+    roots = [p for p in sorted(islands.iterdir()) if p.is_dir()] if islands.is_dir() else []
+    roots = roots or [coral_dir / "public"]
+    paths = []
+    for root in roots:
+        sub = (root / "subagents").resolve()
+        paths.append(str(sub / "results"))
+        paths += [str(sub / "requests" / name) for name in sorted(names)]
+    return paths
+
+
 def build_srt_settings(
     cfg: SandboxConfig,
     *,
@@ -417,7 +474,10 @@ def build_srt_settings(
                 "/private/tmp",  # macOS: /tmp resolves here
                 *cfg.allow_write,
             ],
-            "denyWrite": [private_dir],
+            "denyWrite": [
+                private_dir,
+                *_subagent_deny_writes(worktree_path, coral_dir, sibling_worktrees or []),
+            ],
         },
         # Runtime CLIs allocate ptys for their shell tools (macOS-only knob).
         "allowPty": True,
@@ -445,19 +505,45 @@ def srt_command_prefix(srt_command: list[str], settings_path: Path) -> list[str]
     return [*srt_command, "--settings", str(settings_path), "--"]
 
 
-def is_loopback_host(host: str) -> bool:
-    """True if every address ``host`` resolves to is loopback (127/8, ::1)."""
-    if host.lower() in ("localhost", "localhost.localdomain"):
-        return True
+def loopback_literal(host: str) -> str | None:
+    """The loopback IP to dial for ``host``, or None if it is not one.
+
+    Only IP literals in 127/8, ``::1`` and ``::ffff:127.x`` count, plus the
+    name ``localhost`` (mapped to 127.0.0.1). Other names are never
+    resolved: a DNS lookup would leak the name, and the answer could change
+    between the check and the dial (DNS rebinding).
+    """
+    host = host.strip()
+    if host.lower() == "localhost":
+        return "127.0.0.1"
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
     try:
-        return ipaddress.ip_address(host).is_loopback
+        ip = ipaddress.ip_address(host)
     except ValueError:
-        pass
+        return None
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return str(ip) if ip.is_loopback else None
+
+
+def is_loopback_host(host: str) -> bool:
+    """True if ``host`` is a loopback IP literal or ``localhost`` (no DNS)."""
+    return loopback_literal(host) is not None
+
+
+def _loopback_port(url: Any) -> int | None:
+    """The port of a loopback URL such as the model server's base_url."""
+    if not isinstance(url, str) or "://" not in url:
+        return None
+    from urllib.parse import urlsplit
+
     try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError:
-        return False
-    return bool(infos) and all(ipaddress.ip_address(i[4][0]).is_loopback for i in infos)
+        parts = urlsplit(url)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return None
+    return port if parts.hostname and is_loopback_host(parts.hostname) else None
 
 
 class AllowAllProxy:
@@ -465,6 +551,8 @@ class AllowAllProxy:
 
     With ``allow_host`` set, only destinations it accepts are dialed; the rest
     get ``403 Forbidden`` (agents.internet = false allows loopback only).
+    Loopback destinations are dialed by their validated IP literal, never by
+    name. With ``allowed_ports`` set, only those ports are dialed.
 
     Handles CONNECT tunnels (all HTTPS/TLS traffic — git, pip, npm, model
     APIs) and single-request absolute-URI plain HTTP. Runs entirely in
@@ -475,9 +563,12 @@ class AllowAllProxy:
     _HEAD_LIMIT = 64 * 1024
     _CONNECT_TIMEOUT = 30.0
 
-    def __init__(self, host: str = "127.0.0.1", allow_host=None) -> None:
+    def __init__(
+        self, host: str = "127.0.0.1", allow_host=None, allowed_ports: set[int] | None = None
+    ) -> None:
         self._host = host
         self._allow_host = allow_host
+        self._allowed_ports = set(allowed_ports) if allowed_ports is not None else None
         self._listener: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
@@ -573,10 +664,19 @@ class AllowAllProxy:
         return authority, default_port
 
     def _dial(self, authority: str, default_port: int) -> socket.socket:
-        host, port = self._split_host_port(authority, default_port)
+        try:
+            host, port = self._split_host_port(authority, default_port)
+        except ValueError:
+            raise PermissionError(f"bad authority {authority!r}") from None
+        if not 0 < port < 65536:
+            raise PermissionError(f"bad port {port}")
         if self._allow_host is not None and not self._allow_host(host):
             raise PermissionError(f"{host} is not allowed (agents.internet is off)")
-        return socket.create_connection((host, port), timeout=self._CONNECT_TIMEOUT)
+        if self._allowed_ports is not None and port not in self._allowed_ports:
+            raise PermissionError(f"port {port} is not allowed")
+        # Dial the validated literal, so the name is never resolved after the check.
+        target = loopback_literal(host) or host
+        return socket.create_connection((target, port), timeout=self._CONNECT_TIMEOUT)
 
     def _tunnel(self, conn: socket.socket, target: str) -> None:
         """CONNECT: open a raw tunnel and relay bytes both ways."""

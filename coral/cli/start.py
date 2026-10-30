@@ -437,6 +437,16 @@ def cmd_start(args: argparse.Namespace) -> None:
 
     session = config.run.session
 
+    # Refuse up front (before tmux/docker wrappers or any run directory exist)
+    # when the settings cannot be honoured, e.g. internet=false without a sandbox.
+    from coral.agent.manager import check_run_prerequisites
+
+    try:
+        check_run_prerequisites(config, docker=session == "docker" or in_coral_docker_session())
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
     if session == "docker" and not in_docker():
         if not has_docker():
             print(
@@ -704,6 +714,14 @@ def cmd_resume(args: argparse.Namespace) -> None:
     _enforce_docker_isolation(config)
     if in_coral_docker_session():
         config.to_yaml(config_path)
+
+    from coral.agent.manager import check_run_prerequisites
+
+    try:
+        check_run_prerequisites(config)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     instruction = getattr(args, "instruction", None)
     resume_from = getattr(args, "resume_from", None)

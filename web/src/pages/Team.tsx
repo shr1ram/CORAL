@@ -19,7 +19,7 @@ import {
   type TeamResponse,
 } from "../lib/api";
 import { useSSE } from "../hooks/useSSE";
-import { useInference } from "../hooks/useInference";
+import { useInferenceHistory } from "../hooks/useInference";
 import { useTheme, type Theme } from "../hooks/useTheme";
 import { agentColor } from "../lib/agentColors";
 
@@ -60,6 +60,18 @@ function elapsed(t: number, t0: number): string {
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}`;
 }
 
+/** Items with t <= at, from an array sorted by t (binary search, no scan). */
+function upTo<T extends { t: number }>(items: T[], at: number): T[] {
+  let lo = 0;
+  let hi = items.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (items[mid].t <= at) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo === items.length ? items : items.slice(0, lo);
+}
+
 function matches(i: TeamInteraction, sel: Selection): boolean {
   if (!sel) return true;
   if ("agent" in sel) return i.from === sel.agent || i.to === sel.agent;
@@ -75,10 +87,28 @@ export default function Team() {
   const [selection, setSelection] = useState<Selection>(null);
   const [feed, setFeed] = useState<"messages" | "all">("messages");
 
-  const inference = useInference(5000);
-  const refresh = () => api.team().then(setData).catch(() => {});
+  const samples = useInferenceHistory(5000);
+
+  // Refresh on SSE events, debounced (a burst of events → one request), and
+  // ignore responses that arrive after a newer request's.
+  const seq = useRef(0);
+  const debounce = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const load = () => {
+    const mine = ++seq.current;
+    api
+      .team()
+      .then((d) => {
+        if (mine === seq.current) setData(d);
+      })
+      .catch(() => {});
+  };
+  const refresh = () => {
+    clearTimeout(debounce.current);
+    debounce.current = setTimeout(load, 500);
+  };
   useEffect(() => {
-    refresh();
+    load();
+    return () => clearTimeout(debounce.current);
   }, []);
   useSSE({
     "attempt:new": refresh,
@@ -91,25 +121,31 @@ export default function Team() {
   const t1 = Math.max(data?.now ?? 0, data?.memory.at(-1)?.t ?? 0, t0 + 1);
   const at = cursor ?? t1;
 
-  // Replay: advance the cursor across the run in REPLAY_SECONDS / speed.
-  const lastTick = useRef<number | null>(null);
+  // Replay: advance the cursor across the run in REPLAY_SECONDS / speed. The
+  // position advances every frame but React only re-renders at ~10 Hz.
+  const cursorRef = useRef<number | null>(cursor);
   useEffect(() => {
-    if (!playing) {
-      lastTick.current = null;
-      return;
-    }
+    cursorRef.current = cursor;
+  }, [cursor]);
+  useEffect(() => {
+    if (!playing) return;
     let frame = 0;
+    let last: number | null = null;
+    let lastRender = 0;
+    let pos = cursorRef.current ?? t0;
     const step = (now: number) => {
-      const dt = lastTick.current == null ? 0 : (now - lastTick.current) / 1000;
-      lastTick.current = now;
-      setCursor((c) => {
-        const next = (c ?? t0) + (dt * speed * (t1 - t0)) / REPLAY_SECONDS;
-        if (next >= t1) {
-          setPlaying(false);
-          return null;
-        }
-        return next;
-      });
+      const dt = last == null ? 0 : (now - last) / 1000;
+      last = now;
+      pos += (dt * speed * (t1 - t0)) / REPLAY_SECONDS;
+      if (pos >= t1) {
+        setPlaying(false);
+        setCursor(null);
+        return;
+      }
+      if (now - lastRender >= 100) {
+        lastRender = now;
+        setCursor(pos);
+      }
       frame = requestAnimationFrame(step);
     };
     frame = requestAnimationFrame(step);
@@ -119,11 +155,17 @@ export default function Team() {
   const visible = useMemo(() => {
     if (!data) return null;
     return {
-      interactions: data.interactions.filter((i) => i.t <= at),
-      memory: data.memory.filter((m) => m.t <= at),
-      messages: data.messages.filter((m) => m.t <= at),
+      interactions: upTo(data.interactions, at),
+      memory: upTo(data.memory, at),
+      messages: upTo(data.messages, at),
     };
   }, [data, at]);
+
+  // Live: show every sample (they keep arriving after data.now); replay: up to the cursor.
+  const shownSamples = useMemo(
+    () => (cursor == null ? samples : upTo(samples, cursor)),
+    [samples, cursor],
+  );
 
   if (!data || !visible) {
     return <p className="col-span-2 p-8 font-mono text-xs text-muted-fg">Loading team…</p>;
@@ -159,11 +201,11 @@ export default function Team() {
           onSpeed={setSpeed}
         />
         <MemoryChart memory={visible.memory} t0={t0} t1={t1} theme={theme} />
-        {inference && inference.samples.length > 0 && (
+        {samples.length > 0 && (
           <ThroughputChart
-            samples={inference.samples.filter((x) => x.t <= at)}
+            samples={shownSamples}
             t0={t0}
-            t1={t1}
+            t1={cursor == null ? Math.max(t1, samples[samples.length - 1].t) : t1}
             theme={theme}
           />
         )}
@@ -412,83 +454,90 @@ function MemoryChart({
 }) {
   const muted = theme === "dark" ? "#a6acae" : "#727879";
   const grid = theme === "dark" ? "#292d2f" : "#d0d3d5";
-  const kinds = Object.keys(MEMORY) as MemoryKind[];
+  const chartData = useMemo(() => {
+    const kinds = Object.keys(MEMORY) as MemoryKind[];
+    const datasets = kinds.map((k) => {
+      let n = 0;
+      const pts = [{ x: t0 * 1000, y: 0 }];
+      for (const m of memory) {
+        if (m.kind !== k) continue;
+        n += 1;
+        pts.push({ x: m.t * 1000, y: n });
+      }
+      pts.push({ x: (memory.at(-1)?.t ?? t0) * 1000, y: n });
+      return {
+        label: `${MEMORY[k].label} (${n})`,
+        data: pts,
+        borderColor: MEMORY[k][theme],
+        backgroundColor: MEMORY[k][theme],
+        stepped: true as const,
+        pointRadius: 0,
+        borderWidth: 2,
+        yAxisID: "y",
+      };
+    });
 
-  const datasets = kinds.map((k) => {
-    let n = 0;
-    const pts = [{ x: t0 * 1000, y: 0 }];
+    let best: number | null = null;
+    const bestPts: { x: number; y: number }[] = [];
     for (const m of memory) {
-      if (m.kind !== k) continue;
-      n += 1;
-      pts.push({ x: m.t * 1000, y: n });
+      if (m.kind === "attempt" && m.score != null && (best == null || m.score > best)) {
+        best = m.score;
+        bestPts.push({ x: m.t * 1000, y: best });
+      }
     }
-    pts.push({ x: (memory.at(-1)?.t ?? t0) * 1000, y: n });
+    if (best != null) bestPts.push({ x: (memory.at(-1)?.t ?? t0) * 1000, y: best });
     return {
-      label: `${MEMORY[k].label} (${n})`,
-      data: pts,
-      borderColor: MEMORY[k][theme],
-      backgroundColor: MEMORY[k][theme],
-      stepped: true as const,
-      pointRadius: 0,
-      borderWidth: 2,
-      yAxisID: "y",
+      datasets: [
+        ...datasets,
+        {
+          label: best != null ? `best score (${best.toFixed(1)})` : "best score",
+          data: bestPts,
+          borderColor: theme === "dark" ? "#eceeec" : "#1a1d1e",
+          backgroundColor: theme === "dark" ? "#eceeec" : "#1a1d1e",
+          borderDash: [4, 3],
+          stepped: true as const,
+          pointRadius: 0,
+          borderWidth: 1.5,
+          yAxisID: "y1",
+        },
+      ],
     };
-  });
+  }, [memory, t0, theme]);
 
-  let best: number | null = null;
-  const bestPts: { x: number; y: number }[] = [];
-  for (const m of memory) {
-    if (m.kind === "attempt" && m.score != null && (best == null || m.score > best)) {
-      best = m.score;
-      bestPts.push({ x: m.t * 1000, y: best });
-    }
-  }
-  if (best != null) bestPts.push({ x: (memory.at(-1)?.t ?? t0) * 1000, y: best });
+  const options = useMemo(() => {
+    const tick = { font: { family: "'JetBrains Mono', monospace", size: 10 }, color: muted };
+    return {
+      animation: false as const,
+      maintainAspectRatio: false,
+      parsing: false as const,
+      interaction: { mode: "nearest" as const, intersect: false },
+      scales: {
+        x: {
+          type: "time" as const,
+          min: t0 * 1000,
+          max: t1 * 1000,
+          time: { displayFormats: { minute: "HH:mm", hour: "HH:mm" } },
+          grid: { color: grid },
+          ticks: tick,
+        },
+        y: { beginAtZero: true, grid: { color: grid }, ticks: { ...tick, precision: 0 } },
+        y1: { position: "right" as const, grid: { display: false }, ticks: tick },
+      },
+      plugins: {
+        legend: {
+          position: "top" as const,
+          align: "end" as const,
+          labels: { boxWidth: 10, font: tick.font, color: muted },
+        },
+      },
+    };
+  }, [t0, t1, muted, grid]);
 
-  const tick = { font: { family: "'JetBrains Mono', monospace", size: 10 }, color: muted };
   return (
     <div className="h-56 shrink-0 border-t border-border px-4 pt-2 pb-3">
       <p className="font-mono text-[10px] tracking-widest uppercase text-muted-fg mb-1">Shared memory over time</p>
       <div className="h-[calc(100%-1.25rem)]">
-        <Line
-          data={{
-            datasets: [
-              ...datasets,
-              {
-                label: best != null ? `best score (${best.toFixed(1)})` : "best score",
-                data: bestPts,
-                borderColor: theme === "dark" ? "#eceeec" : "#1a1d1e",
-                backgroundColor: theme === "dark" ? "#eceeec" : "#1a1d1e",
-                borderDash: [4, 3],
-                stepped: true as const,
-                pointRadius: 0,
-                borderWidth: 1.5,
-                yAxisID: "y1",
-              },
-            ],
-          }}
-          options={{
-            animation: false,
-            maintainAspectRatio: false,
-            parsing: false,
-            interaction: { mode: "nearest", intersect: false },
-            scales: {
-              x: {
-                type: "time",
-                min: t0 * 1000,
-                max: t1 * 1000,
-                time: { displayFormats: { minute: "HH:mm", hour: "HH:mm" } },
-                grid: { color: grid },
-                ticks: tick,
-              },
-              y: { beginAtZero: true, grid: { color: grid }, ticks: { ...tick, precision: 0 } },
-              y1: { position: "right", grid: { display: false }, ticks: tick },
-            },
-            plugins: {
-              legend: { position: "top", align: "end", labels: { boxWidth: 10, font: tick.font, color: muted } },
-            },
-          }}
-        />
+        <Line data={chartData} options={options} />
       </div>
     </div>
   );
@@ -512,12 +561,24 @@ function ThroughputChart({
   const line = theme === "dark" ? "#eceeec" : "#1a1d1e";
   const tick = { font: { family: "'JetBrains Mono', monospace", size: 10 }, color: muted };
   const prompt = theme === "dark" ? "#d4a72c" : "#9a6700";
-  const recent = samples.slice(-30); // ~1 minute at the 2 s sampling rate
-  const mean = (f: (x: InferenceSample) => number) =>
-    recent.length ? recent.reduce((a, x) => a + f(x), 0) / recent.length : 0;
-  const genAvg = mean((x) => x.tok_s);
-  const promptAvg = mean((x) => x.prompt_tok_s ?? 0);
-  const total = samples.reduce((a, x, i) => (i ? a + x.tok_s * (x.t - samples[i - 1].t) : a), 0);
+  const { genAvg, promptAvg, total, gen, read } = useMemo(() => {
+    const last = samples.at(-1)?.t ?? 0;
+    const recent = upTo(samples, last).filter((x) => x.t > last - 60); // last minute
+    const mean = (f: (x: InferenceSample) => number) =>
+      recent.length ? recent.reduce((a, x) => a + f(x), 0) / recent.length : 0;
+    // Sum the per-sample token counts; older samples only have a rate.
+    const total = samples.reduce(
+      (a, x, i) => a + (x.gen ?? (i ? x.tok_s * (x.t - samples[i - 1].t) : 0)),
+      0,
+    );
+    return {
+      genAvg: mean((x) => x.tok_s),
+      promptAvg: mean((x) => x.prompt_tok_s ?? 0),
+      total,
+      gen: samples.map((x) => ({ x: x.t * 1000, y: x.tok_s })),
+      read: samples.map((x) => ({ x: x.t * 1000, y: x.prompt_tok_s ?? 0 })),
+    };
+  }, [samples]);
 
   return (
     <div className="h-36 shrink-0 border-t border-border px-4 pt-2 pb-3">
@@ -535,7 +596,7 @@ function ThroughputChart({
             datasets: [
               {
                 label: "generating tok/s",
-                data: samples.map((x) => ({ x: x.t * 1000, y: x.tok_s })),
+                data: gen,
                 borderColor: line,
                 backgroundColor: line,
                 pointRadius: 0,
@@ -544,7 +605,7 @@ function ThroughputChart({
               },
               {
                 label: "reading prompts tok/s",
-                data: samples.map((x) => ({ x: x.t * 1000, y: x.prompt_tok_s ?? 0 })),
+                data: read,
                 borderColor: prompt,
                 backgroundColor: prompt,
                 pointRadius: 0,
@@ -609,7 +670,10 @@ function Feed({
         ? visible.interactions.filter((i) => i.kind === "message" || i.kind === "broadcast")
         : visible.interactions;
     // A broadcast fans out to every agent; show it once in the feed.
+    // Keys come from the item itself (plus an occurrence count for exact
+    // duplicates), so they stay stable as new items arrive at the top.
     const seen = new Set<string>();
+    const occurrences = new Map<string, number>();
     return src
       .filter((i) => matches(i, selection))
       .filter((i) => {
@@ -619,7 +683,12 @@ function Feed({
         seen.add(key);
         return true;
       })
-      .slice()
+      .map((i) => {
+        const base = `${i.t}|${i.from}|${i.to}|${i.kind}|${i.text}`;
+        const n = occurrences.get(base) ?? 0;
+        occurrences.set(base, n + 1);
+        return { ...i, key: `${base}|${n}` };
+      })
       .reverse();
   }, [visible.interactions, feed, selection]);
 
@@ -675,8 +744,8 @@ function Feed({
               : "Nothing yet."}
           </p>
         )}
-        {items.map((i, n) => (
-          <div key={`${i.t}-${n}`} className="border-l-2 pl-3" style={{ borderColor: KINDS[i.kind][theme] }}>
+        {items.map((i) => (
+          <div key={i.key} className="border-l-2 pl-3" style={{ borderColor: KINDS[i.kind][theme] }}>
             <div className="flex items-baseline gap-2 font-mono text-[10px] text-muted-fg">
               <span>{elapsed(i.t, t0)}</span>
               <span className="text-foreground">{i.from}</span>

@@ -160,6 +160,27 @@ def test_cli_msg_from_outside_a_worktree_is_from_operator(cli_run):
     assert read_unread(coral_dir, "beta")[0].sender == "operator"
 
 
+def test_cli_inbox_outside_a_worktree_marks_nothing_read(cli_run, capsys):
+    coral_dir = cli_run(agent="unknown")
+    send(coral_dir, "alpha", "all", "hello")
+    with pytest.raises(SystemExit):
+        cli_messages.cmd_inbox(_cli_args())
+    assert "inside an agent worktree" in capsys.readouterr().err
+    cli_messages.cmd_inbox(_cli_args(all=True))
+    assert "hello" in capsys.readouterr().out
+    assert [m.body for m in read_unread(coral_dir, "beta")] == ["hello"]
+
+
+def test_cli_multi_island_outside_a_worktree_errors_cleanly(cli_run, capsys):
+    coral_dir = cli_run(agent="unknown")
+    (coral_dir / "islands" / "0").mkdir(parents=True)
+    with pytest.raises(SystemExit):
+        cli_messages.cmd_msg(_cli_args(to="all", body=["hi"]))
+    with pytest.raises(SystemExit):
+        cli_messages.cmd_inbox(_cli_args(all=True))
+    assert "multi-island" in capsys.readouterr().err
+
+
 def _manager_with_one_scored_attempt(tmp_path, monkeypatch, mode, heartbeat_every):
     """An AgentManager whose monitor loop sees one scored attempt from beta."""
     from types import SimpleNamespace
@@ -195,7 +216,7 @@ def _manager_with_one_scored_attempt(tmp_path, monkeypatch, mode, heartbeat_ever
 
     monkeypatch.setattr(mgr, "_get_seen_attempts", lambda: next(seen, {"h1"}))
     monkeypatch.setattr(mgr, "_filter_scored", lambda attempts: attempts)
-    monkeypatch.setattr(mgr, "_read_latest_attempt", lambda new, agent_id=None: attempt)
+    monkeypatch.setattr(mgr, "_read_scored_attempts", lambda files: [attempt])
     monkeypatch.setattr(mgr, "_auto_stop_reason_from_current_state", lambda: None)
     monkeypatch.setattr(mgr, "_auto_stop_reason_from_attempt", lambda a: None)
     monkeypatch.setattr(mgr, "_get_eval_count", lambda: 1)
@@ -242,3 +263,19 @@ def test_manager_ignores_messages_in_compete_mode(tmp_path, monkeypatch):
     mgr.monitor_loop(check_interval=0)
 
     assert delivered == []
+
+
+def test_manager_keeps_messages_unread_if_resume_fails(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    mgr, coral_dir, delivered = _manager_with_one_scored_attempt(
+        tmp_path, monkeypatch, "cooperate", heartbeat_every=100
+    )
+    dead = SimpleNamespace(agent_id="beta", alive=False)
+    monkeypatch.setattr(mgr, "_interrupt_and_resume", lambda idx, prompt, prompt_source: dead)
+    monkeypatch.setattr(mgr, "_is_paused", lambda agent_id: True)  # no restart in the tail
+    send(coral_dir, "alpha", "beta", "check n=26")
+
+    mgr.monitor_loop(check_interval=0)
+
+    assert [m.body for m in read_unread(coral_dir, "beta")] == ["check n=26"]

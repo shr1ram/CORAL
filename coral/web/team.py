@@ -35,10 +35,22 @@ def _epoch(stamp: str | None) -> float | None:
         return None
 
 
-def _born(path: Path) -> float:
-    """When a file or dir first appeared (birth time where the OS records it)."""
-    stat = path.stat()
-    return getattr(stat, "st_birthtime", stat.st_mtime)
+def _mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _note_time(path: Path, created: str | None) -> float | None:
+    """When a note was written: its front-matter ``created`` stamp if that has
+    a time of day, else the file's mtime (seeded notes keep their old mtime)."""
+    stamp = str(created or "")
+    if "T" in stamp or " " in stamp.strip():
+        t = _epoch(stamp.strip().replace(" ", "T", 1))
+        if t is not None:
+            return t
+    return _mtime(path) or _epoch(stamp)
 
 
 def _run_mode(coral_dir: Path) -> str:
@@ -50,8 +62,16 @@ def _run_mode(coral_dir: Path) -> str:
 
 
 def _run_start(coral_dir: Path) -> float | None:
-    config = coral_dir / "config.yaml"
-    return _born(config) if config.exists() else None
+    """When the run started: the run directory's own name (``YYYY-MM-DD_HHMMSS``,
+    local time, written by CORAL), else the oldest of its start-up files' mtimes.
+    Works on Linux, which has no file birth time."""
+    run_dir = coral_dir.parent
+    try:
+        return datetime.strptime(run_dir.name, "%Y-%m-%d_%H%M%S").timestamp()
+    except ValueError:
+        pass
+    times = [t for t in (_mtime(run_dir / "start_cmd.txt"), _mtime(coral_dir / "config.yaml")) if t]
+    return min(times) if times else None
 
 
 def team_view(coral_dir: str | Path) -> dict[str, Any]:
@@ -104,7 +124,7 @@ def team_view(coral_dir: str | Path) -> dict[str, Any]:
         graph = notes_graph(str(coral_dir), island_id=root.name if len(roots) > 1 else None)
         for node in graph["nodes"]:
             path = root / "notes" / node["id"]
-            t = _born(path) if path.exists() else _epoch(node.get("date"))
+            t = _note_time(path, node.get("date"))
             if start is not None and t is not None and t < start:
                 continue  # seeded before the run
             note_time[node["id"]] = t
@@ -136,8 +156,9 @@ def team_view(coral_dir: str | Path) -> dict[str, Any]:
         if not skills_dir.is_dir():
             continue
         for skill in sorted(p for p in skills_dir.iterdir() if p.is_dir()):
-            t = _born(skill)
-            if start is not None and t < start + 5:
+            # SKILL.md mtime: seeded skills are copied with their old mtimes.
+            t = _mtime(skill / "SKILL.md") or _mtime(skill)
+            if t is None or (start is not None and t < start):
                 continue
             memory.append({"t": t, "kind": "skill", "agent": None, "label": skill.name})
 

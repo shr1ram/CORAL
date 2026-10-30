@@ -67,6 +67,25 @@ def default_prompt(name: str, instructions: str = "minimal", subagents: bool = F
     return prompts.get(name, "")
 
 
+def run_default_prompt(coral_dir: Path | str, name: str) -> str:
+    """Built-in prompt for ``name`` under the run's own instruction settings.
+
+    Reads ``agents.instructions`` and ``agents.subagents`` from the run's
+    ``config.yaml`` so prompts written outside the manager (protected re-adds,
+    ``coral heartbeat set``) match what the manager would have seeded.
+    """
+    import yaml
+
+    try:
+        config = yaml.safe_load((Path(coral_dir) / "config.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        config = {}
+    agents = config.get("agents") or {}
+    return default_prompt(
+        name, agents.get("instructions", "minimal"), bool(agents.get("subagents", False))
+    )
+
+
 # Which built-in actions default to global scope
 DEFAULT_GLOBAL: dict[str, bool] = {
     "reflect": False,
@@ -189,7 +208,7 @@ def write_agent_heartbeat(
                 {
                     "name": name,
                     "every": 1,
-                    "prompt": DEFAULT_PROMPTS.get(name, ""),
+                    "prompt": run_default_prompt(coral_dir, name),
                 }
             )
     _write_actions(_heartbeat_path(coral_dir, agent_id, island_id), actions)
@@ -252,7 +271,7 @@ def write_global_heartbeat(
                 {
                     "name": name,
                     "every": 10,
-                    "prompt": DEFAULT_PROMPTS.get(name, ""),
+                    "prompt": run_default_prompt(coral_dir, name),
                 }
             )
     _write_actions(_heartbeat_path(coral_dir, _GLOBAL_ID, island_id), actions)

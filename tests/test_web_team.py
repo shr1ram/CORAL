@@ -109,3 +109,23 @@ async def test_team_endpoint_returns_json(tmp_path):
 
     assert response.status_code == 200
     assert json.loads(response.body)["messages"][0]["body"] == "hi"
+
+
+def test_run_start_comes_from_run_directory_name(tmp_path):
+    from datetime import datetime
+
+    from coral.web.team import _note_time, _run_start
+
+    coral_dir = tmp_path / "2026-10-30_101500" / ".coral"
+    coral_dir.mkdir(parents=True)
+    assert _run_start(coral_dir) == datetime(2026, 10, 30, 10, 15).timestamp()
+
+    other = tmp_path / "custom" / ".coral"
+    other.mkdir(parents=True)
+    (other / "config.yaml").write_text("{}")
+    assert _run_start(other) == (other / "config.yaml").stat().st_mtime
+
+    note = tmp_path / "n.md"
+    note.write_text("x")
+    assert _note_time(note, "2026-10-30T10:20:00") == datetime(2026, 10, 30, 10, 20).timestamp()
+    assert _note_time(note, "2026-10-30") == note.stat().st_mtime

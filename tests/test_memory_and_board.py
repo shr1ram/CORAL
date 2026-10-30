@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from coral.agent import memory_service
 from coral.agent.memory_service import MemoryService
 from coral.config import AgentConfig, CoralConfig, GraderConfig, TaskConfig
 from coral.hub.attempts import write_attempt
@@ -86,9 +87,12 @@ def test_bm25_ranks_relevant_documents_first():
 class FakeLLM:
     def __init__(self):
         self.prompts: list[str] = []
+        self.fail = False
 
     def __call__(self, prompt: str) -> str:
         self.prompts.append(prompt)
+        if self.fail:
+            raise RuntimeError("empty reply (finish_reason=length)")
         if prompt.startswith("You maintain a coding team's shared memory"):
             return json.dumps(
                 {
@@ -160,10 +164,15 @@ def test_writer_turns_attempts_into_items_with_diff(tmp_path):
     assert "return 1" in llm.prompts[0] and "Mean score 2133" in llm.prompts[0]
 
 
-def test_brief_follows_status_and_recall(tmp_path):
+def _drain(service):
+    while service.step():
+        pass
+
+
+def test_brief_follows_status_recall_and_new_attempts(tmp_path):
     coral_dir, commits, llm, service = _service(tmp_path, every=100)
     write_attempt(coral_dir, _attempt(commits[1], commits[0], "beta", 2133.0, 1))
-    service.step()  # writer
+    _drain(service)  # writer, then beta's brief for its new item
     record = write_status(coral_dir, "alpha", status="rectangles", recall="did notches work?")
 
     assert service.step() is True  # librarian
@@ -174,6 +183,44 @@ def test_brief_follows_status_and_recall(tmp_path):
     )
     assert 'Its question for you: "did notches work?"' in llm.prompts[-1]
     assert service.step() is False  # nothing new to do
+
+    # alpha's own new attempt refreshes its brief even without a new status
+    write_attempt(coral_dir, _attempt(commits[2], commits[1], "alpha", 2000.0, 2))
+    _drain(service)
+    assert read_brief(coral_dir, "alpha")["trigger"].endswith(commits[2])
+
+
+def test_failed_calls_back_off_and_never_write_empty_briefs(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(memory_service.time, "monotonic", lambda: clock[0])
+    coral_dir, commits, llm, service = _service(tmp_path, every=100)
+    write_attempt(coral_dir, _attempt(commits[1], commits[0], "beta", 2133.0, 1))
+    llm.fail = True
+
+    assert service.step() is True and read_items(coral_dir) == []
+    assert service.step() is False  # backing off
+    for _ in range(memory_service.MAX_FAILURES - 1):
+        clock[0] += 601
+        service.step()
+    item = read_items(coral_dir)[0]  # gave up: plain item from the attempt
+    assert item["approach"] == "try 1" and item["result"] == "score 2133.0"
+    _drain(service)
+    assert read_brief(coral_dir, "beta") is None
+
+
+def test_unchanged_or_unscored_attempts_skip_the_writer_call(tmp_path):
+    coral_dir, commits, llm, service = _service(tmp_path)
+    crashed = _attempt(commits[1], commits[0], "beta", None, 1)
+    crashed.feedback = "compile error: missing ;"
+    write_attempt(coral_dir, crashed)
+    write_attempt(coral_dir, _attempt(commits[2], commits[2], "alpha", 5.0, 2))  # empty diff
+    while service.step():
+        pass
+
+    items = {i["agent"]: i for i in read_items(coral_dir)}
+    assert items["beta"]["result"] == "no score: compile error: missing ;"
+    assert items["alpha"]["result"] == "no code change"
+    assert not any(p.startswith("You maintain") for p in llm.prompts)
 
 
 def test_state_of_play_every_n_items(tmp_path):

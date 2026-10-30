@@ -556,6 +556,7 @@ def test_resume_from_worktree_subdir_uses_breadcrumb_run(monkeypatch, tmp_path):
               description: resume test
             agents:
               count: 2
+              internet: true
             islands:
               count: 2
             run:

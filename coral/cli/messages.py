@@ -30,6 +30,26 @@ def _require_cooperate(coral_dir: Path) -> None:
         sys.exit(1)
 
 
+def _find_run(args: argparse.Namespace) -> tuple[Path, str | None]:
+    """The run's .coral dir and island; exits cleanly if no island can be chosen."""
+    from coral.hub._island import island_root
+
+    coral_dir, island_id = find_coral_dir_and_island(
+        getattr(args, "task", None), getattr(args, "run", None)
+    )
+    _require_cooperate(coral_dir)
+    try:
+        island_root(coral_dir, island_id)
+    except ValueError:
+        print(
+            "Error: this is a multi-island run, and messages belong to one island. "
+            "Run this inside an agent worktree on that island.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return coral_dir, island_id
+
+
 def _known_agents(coral_dir: Path, island_id: str | None) -> set[str]:
     from coral.hub._island import island_root
 
@@ -45,10 +65,7 @@ def cmd_msg(args: argparse.Namespace) -> None:
     """
     from coral.hub.messages import BROADCAST, send
 
-    coral_dir, island_id = find_coral_dir_and_island(
-        getattr(args, "task", None), getattr(args, "run", None)
-    )
-    _require_cooperate(coral_dir)
+    coral_dir, island_id = _find_run(args)
     # Outside an agent worktree (a human steering the run) the sender is "operator".
     sender = args.sender or read_agent_id()
     if sender == "unknown":
@@ -88,15 +105,20 @@ def cmd_inbox(args: argparse.Namespace) -> None:
     """
     from coral.hub.messages import format_messages, list_messages, mark_read, read_unread
 
-    coral_dir, island_id = find_coral_dir_and_island(
-        getattr(args, "task", None), getattr(args, "run", None)
-    )
-    _require_cooperate(coral_dir)
+    coral_dir, island_id = _find_run(args)
     if args.all:
         messages = list_messages(coral_dir, island_id)
         print(format_messages(messages) if messages else "No messages yet.")
         return
     agent_id = read_agent_id()
+    if agent_id == "unknown":
+        # Outside a worktree there is no reader to mark messages read for.
+        print(
+            "Error: `coral inbox` shows an agent's unread messages; run it inside an agent "
+            "worktree, or use `coral inbox --all` to see every message.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     messages = read_unread(coral_dir, agent_id, island_id)
     if not messages:
         print("No unread messages.")

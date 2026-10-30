@@ -25,6 +25,7 @@ def _drive_cmd_start(monkeypatch, tmp_path, *, session, wrapped_session, in_tmux
     base = CoralConfig()
     base.task.name = "t"
     base.task.description = "t"
+    base.agents.internet = True  # not under test; skips the offline sandbox check
     base.run.session = session
 
     monkeypatch.setattr(start_mod.CoralConfig, "from_yaml", classmethod(lambda cls, path: base))

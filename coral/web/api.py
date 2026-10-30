@@ -228,25 +228,47 @@ async def get_notes_graph(request: Request) -> JSONResponse:
 
 async def get_team(request: Request) -> JSONResponse:
     """GET /api/team — agents, their interactions, and shared-memory growth over time."""
+    import asyncio
+
     from coral.web.team import team_view
 
-    return JSONResponse(team_view(_coral_dir(request)))
+    return JSONResponse(await asyncio.to_thread(team_view, _coral_dir(request)))
 
 
 async def get_inference(request: Request) -> JSONResponse:
-    """GET /api/inference — inference server tokens/s: latest sample and the run's history."""
-    from coral.web.inference import manager_alive, read_samples
+    """GET /api/inference — inference server tokens/s.
+
+    By default only the latest sample (cheap enough to poll every couple of
+    seconds). ``?history=1`` adds the run's samples, downsampled for charting;
+    ``?since=<epoch>`` adds only samples newer than that.
+    """
+    import asyncio
+
+    from coral.web.inference import downsample, manager_alive, samples_for
 
     coral_dir = _coral_dir(request)
     sampler = getattr(request.app.state, "inference", None)
-    latest = sampler.latest if sampler is not None and manager_alive(coral_dir) else None
-    return JSONResponse(
-        {
-            "enabled": sampler is not None,
-            "latest": latest,
-            "samples": read_samples(coral_dir),
-        }
-    )
+    alive = sampler is not None and await asyncio.to_thread(manager_alive, coral_dir)
+    body: dict[str, Any] = {
+        "enabled": sampler is not None,
+        "latest": sampler.latest if alive else None,
+    }
+    since = request.query_params.get("since")
+    if request.query_params.get("history") or since:
+        samples = await asyncio.to_thread(samples_for, coral_dir)
+        if since:
+            try:
+                cutoff = float(since)
+            except ValueError:
+                return JSONResponse({"error": "since must be epoch seconds"}, status_code=400)
+            body["samples"] = [x for x in samples if x["t"] > cutoff]
+        else:
+            try:
+                limit = int(request.query_params.get("max", "1500"))
+            except ValueError:
+                limit = 1500
+            body["samples"] = downsample(samples, limit)
+    return JSONResponse(body)
 
 
 async def get_live(request: Request) -> JSONResponse:
@@ -309,22 +331,34 @@ async def get_skill_detail(request: Request) -> JSONResponse:
 
 
 async def get_logs(request: Request) -> JSONResponse:
-    """GET /api/logs/{agent_id} — return parsed log turns for an agent."""
-    from coral.web.logs import list_log_files, parse_log_file
+    """GET /api/logs/{agent_id} — return parsed log turns for an agent.
 
-    agent_id = request.path_params["agent_id"]
-    coral_dir = _coral_dir(request)
-    agent_logs = list_log_files(coral_dir)
+    Parsing runs in a worker thread and is incremental: each log file is read
+    from where the previous request stopped (see ``parse_log_cached``).
+    """
+    import asyncio
 
-    if agent_id not in agent_logs:
+    payload = await asyncio.to_thread(
+        _logs_payload, _coral_dir(request), request.path_params["agent_id"]
+    )
+    if payload is None:
         return JSONResponse({"error": "agent not found"}, status_code=404)
+    return JSONResponse(payload)
+
+
+def _logs_payload(coral_dir: Path, agent_id: str) -> dict[str, Any] | None:
+    from coral.web.logs import list_log_files, parse_log_cached
+
+    agent_logs = list_log_files(coral_dir)
+    if agent_id not in agent_logs:
+        return None
 
     # Parse all log files for this agent, grouped by session
     sessions: list[dict[str, Any]] = []
     all_session_metas: list[dict[str, Any]] = []
     global_turn_idx = 0
     for log_info in sorted(agent_logs[agent_id], key=lambda x: x["index"]):
-        turns, _, session_meta = parse_log_file(Path(log_info["path"]))
+        turns, session_meta = parse_log_cached(Path(log_info["path"]))
         session_turns = []
         for t in turns:
             td = t.to_dict()
@@ -364,15 +398,13 @@ async def get_logs(request: Request) -> JSONResponse:
             "usage": agg_usage,
         }
 
-    return JSONResponse(
-        {
-            "agent_id": agent_id,
-            "log_files": agent_logs[agent_id],
-            "turns": all_turns,
-            "sessions": sessions,
-            "agent_meta": agent_meta,
-        }
-    )
+    return {
+        "agent_id": agent_id,
+        "log_files": agent_logs[agent_id],
+        "turns": all_turns,
+        "sessions": sessions,
+        "agent_meta": agent_meta,
+    }
 
 
 async def get_logs_list(request: Request) -> JSONResponse:

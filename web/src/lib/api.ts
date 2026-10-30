@@ -318,12 +318,15 @@ export interface InferenceSample {
   active: number;
   reading?: number; // busy slots still reading their prompt
   slots: number;
+  gen?: number; // tokens generated since the previous sample (newer samples)
+  prompt?: number; // prompt tokens read since the previous sample
+  dt?: number; // seconds since the previous sample
 }
 
 export interface InferenceResponse {
   enabled: boolean;
   latest: (InferenceSample & { error?: string }) | null;
-  samples: InferenceSample[];
+  samples?: InferenceSample[]; // only with ?history=1 or ?since=<t>
 }
 
 export interface LiveSlot {
@@ -365,7 +368,10 @@ export const api = {
   notes: () => get<Note[]>("/notes"),
   notesGraph: () => get<NotesGraphResponse>("/notes/graph"),
   team: () => get<TeamResponse>("/team"),
-  inference: () => get<InferenceResponse>("/inference"),
+  inference: (q: { history?: boolean; since?: number } = {}) =>
+    get<InferenceResponse>(
+      q.since != null ? `/inference?since=${q.since}` : q.history ? "/inference?history=1" : "/inference",
+    ),
   live: () => get<LiveResponse>("/live"),
   skills: () => get<Skill[]>("/skills"),
   skill: (name: string) => get<SkillDetail>(`/skills/${name}`),

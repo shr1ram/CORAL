@@ -16,16 +16,27 @@ from coral.hub.heartbeat import default_prompt
 from coral.hub.subagents import get_result, read_definitions, running_count, submit, wait_result
 from coral.template.coral_md import generate_coral_md
 
-# Stands in for `claude`: records its argv, sleeps, prints Claude Code's JSON result.
+# Stands in for `claude`: records argv, stdin, cwd and env, sleeps, prints Claude Code's
+# JSON result. The broker passes an allowlisted env, so its knobs live next to the script.
 FAKE_CLAUDE = """
 import json, sys, time, os, pathlib
-log = pathlib.Path(os.environ["FAKE_LOG"])
-with log.open("a") as f:
-    f.write(json.dumps({"argv": sys.argv[1:], "start": time.time()}) + "\\n")
-time.sleep(float(os.environ.get("FAKE_SLEEP", "0")))
-print(json.dumps({"result": "did it", "is_error": False, "total_cost_usd": 0.5,
-                  "num_turns": 3, "duration_ms": 10}))
+here = pathlib.Path(__file__).parent
+stdin = sys.stdin.read()
+with (here / "calls.jsonl").open("a") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "stdin": stdin, "cwd": os.getcwd(),
+                        "env": sorted(os.environ), "start": time.time()}) + "\\n")
+time.sleep(float((here / "sleep").read_text()))
+print((here / "output").read_text())
 """
+OUTPUT = json.dumps(
+    {
+        "result": "did it",
+        "is_error": False,
+        "total_cost_usd": 0.5,
+        "num_turns": 3,
+        "duration_ms": 10,
+    }
+)
 
 
 def _config(**agents) -> CoralConfig:
@@ -35,16 +46,19 @@ def _config(**agents) -> CoralConfig:
     )
 
 
-def _run(tmp_path, monkeypatch, sleep=0.0, **agents):
+def _run(tmp_path, monkeypatch, sleep=0.0, output=OUTPUT, **agents):
     coral_dir = tmp_path / "run" / ".coral"
     (coral_dir / "public" / "agents").mkdir(parents=True)
     for agent in ("alpha", "beta"):
         (tmp_path / "run" / "agents" / agent).mkdir(parents=True)
-    script = tmp_path / "fake_claude.py"
+        (tmp_path / "run" / "agents" / agent / ".coral_agent_id").write_text(agent)
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    script = fake / "fake_claude.py"
     script.write_text(FAKE_CLAUDE)
-    log = tmp_path / "calls.jsonl"
-    monkeypatch.setenv("FAKE_LOG", str(log))
-    monkeypatch.setenv("FAKE_SLEEP", str(sleep))
+    (fake / "sleep").write_text(str(sleep))
+    (fake / "output").write_text(output)
+    log = fake / "calls.jsonl"
     config = _config(subagent_command=[sys.executable, str(script)], **agents)
     broker = SubagentBroker(
         config, coral_dir, lambda a: tmp_path / "run" / "agents" / a, [None], poll=0.05
@@ -86,7 +100,20 @@ def test_broker_runs_claude_locked_down(tmp_path, monkeypatch):
         broker.stop()
 
     assert result["ok"] and result["result"] == "did it" and result["cost_usd"] == 0.5
-    argv = _calls(log)[0]["argv"]
+    call = _calls(log)[0]
+    argv = call["argv"]
+    # The task goes on stdin, never as an argument; claude runs from a broker-owned scratch dir.
+    assert call["stdin"] == "Write an SA solver" and "Write an SA solver" not in argv
+    assert Path(call["cwd"]).parent == (tmp_path / "run" / ".subagent-scratch").resolve()
+    assert not Path(call["cwd"]).exists()  # cleaned up afterwards
+    assert "--restricted" in argv
+    add_dirs = [argv[i + 1] for i, a in enumerate(argv) if a == "--add-dir"]
+    shared = (coral_dir / "public").resolve()
+    assert add_dirs == [
+        str((tmp_path / "run" / "agents" / "alpha").resolve()),
+        str(shared / "notes"),
+        str(shared / "skills"),
+    ]
     assert argv[argv.index("--model") + 1] == "sonnet"
     assert argv[argv.index("--tools") + 1] == "Bash,Read,Write,Edit,Glob,Grep"
     assert argv[argv.index("--setting-sources") + 1] == "project"

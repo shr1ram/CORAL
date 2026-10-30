@@ -45,6 +45,10 @@ agents:
   internet: false      # sandboxed agents reach only localhost (the model server)
   sandbox:
     enabled: true
+    # ALE-Bench's problem cache holds the private test seeds and the input
+    # generator; agents may read ~/.cache (toolchain caches) but not this.
+    deny_read:
+      - /Users/shriramruppa/.cache/ale-bench
   runtime_options:     # used by loop: oneshot; Pi ignores them
     base_url: http://127.0.0.1:11501/v1
     target: solution.cpp

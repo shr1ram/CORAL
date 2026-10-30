@@ -9,7 +9,10 @@ from coral.web.api import get_inference
 from coral.web.inference import (
     SAMPLES_FILE,
     InferenceSampler,
+    downsample,
+    match_slots,
     read_samples,
+    samples_for,
     slot_progress,
     tokens_since,
 )
@@ -52,12 +55,51 @@ def test_samples_append_only_while_run_is_alive(tmp_path):
     assert [s["tok_s"] for s in read_samples(tmp_path)] == [20.0]
 
 
-async def test_inference_endpoint_without_sampler(tmp_path):
-    (tmp_path / SAMPLES_FILE).write_text(json.dumps({"t": 1, "tok_s": 42.0}) + "\n")
-    request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(coral_dir=tmp_path, inference=None))
+def _request(tmp_path, **params):
+    return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(coral_dir=tmp_path, inference=None)),
+        query_params=params,
     )
 
-    body = json.loads((await get_inference(request)).body)
 
-    assert body == {"enabled": False, "latest": None, "samples": [{"t": 1, "tok_s": 42.0}]}
+async def test_inference_endpoint_history_is_opt_in(tmp_path):
+    (tmp_path / SAMPLES_FILE).write_text(
+        json.dumps({"t": 1, "tok_s": 42.0}) + "\n" + json.dumps({"t": 2, "tok_s": 7.0}) + "\n"
+    )
+
+    latest_only = json.loads((await get_inference(_request(tmp_path))).body)
+    history = json.loads((await get_inference(_request(tmp_path, history="1"))).body)
+    since = json.loads((await get_inference(_request(tmp_path, since="1"))).body)
+
+    assert latest_only == {"enabled": False, "latest": None}
+    assert [s["t"] for s in history["samples"]] == [1, 2]
+    assert [s["t"] for s in since["samples"]] == [2]
+
+
+def test_samples_are_read_incrementally(tmp_path):
+    path = tmp_path / SAMPLES_FILE
+    path.write_text(json.dumps({"t": 1}) + "\n" + '{"t": 2')  # last line still being written
+    assert [s["t"] for s in samples_for(tmp_path)] == [1]
+    with path.open("a") as f:
+        f.write("}\n" + json.dumps({"t": 3}) + "\n")
+    assert [s["t"] for s in samples_for(tmp_path)] == [1, 2, 3]
+
+
+def test_downsample_preserves_token_totals():
+    samples = [{"t": i, "dt": 1.0, "gen": 10, "prompt": 100, "tok_s": 10.0} for i in range(10)]
+    out = downsample(samples, 3)
+    assert len(out) <= 3
+    assert sum(s["gen"] for s in out) == 100 and sum(s["prompt"] for s in out) == 1000
+    assert all(s["tok_s"] == 10.0 for s in out)
+
+
+def test_match_slots_never_pairs_waiting_with_generating():
+    agents = {
+        "a": {"state": "waiting", "context_tokens": 5000},
+        "b": {"state": "streaming", "context_tokens": 5000},
+    }
+    slots = [
+        {"id": 0, "busy": True, "prompt": 5000, "decoded": 30},  # generating
+    ]
+    assert match_slots(agents, slots) == {"b": 0}
+    assert match_slots({"a": agents["a"]}, slots) == {}
