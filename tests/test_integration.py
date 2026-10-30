@@ -38,7 +38,7 @@ def test_full_workspace_creation():
         config = CoralConfig(
             task=TaskConfig(name="optimize", description="Make it fast", tips="Profile first"),
             grader=GraderConfig(),
-            agents=AgentConfig(count=2),
+            agents=AgentConfig(count=2, instructions="full"),
             workspace=WorkspaceConfig(results_dir=str(base / "results"), repo_path=str(repo)),
         )
 
@@ -132,7 +132,7 @@ def test_coral_md_generation():
             tips="- Use SIMD vectorization\n- Minimize memory stalls",
         ),
         grader=GraderConfig(direction="minimize"),
-        agents=AgentConfig(count=3),
+        agents=AgentConfig(count=3, instructions="full"),
     )
 
     md = generate_coral_md(config, "agent-2")

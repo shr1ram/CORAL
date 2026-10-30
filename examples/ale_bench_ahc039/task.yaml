@@ -18,6 +18,7 @@ task:
     - Validate your polygon carefully (edge count, axis-aligned edges, perimeter limit,
       no self-intersection); an invalid answer scores 0 for that case.
     - The eval feedback lists verdicts per case and the first failure's message.
+    - Work in C++. The system Python has no numpy or scipy, so prototype in C++ too.
 
 grader:
   entrypoint: "ale_bench_grader.grader:Grader"
@@ -38,7 +39,16 @@ agents:
   runtime: pi
   model: local/flint
   research: false
-  mode: compete
+  mode: compete        # compete | cooperate (agents can message each other)
+  loop: agentic        # agentic (Pi with tools) | oneshot (one model call per attempt)
+  instructions: minimal
+  runtime_options:     # used by loop: oneshot; Pi ignores them
+    base_url: http://127.0.0.1:11501/v1
+    target: solution.cpp
+    context: [statement.md]
+    language: cpp
+    max_tokens: 32768
+    temperature: 1.0
 
 run:
   session: local

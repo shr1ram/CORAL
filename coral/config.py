@@ -10,6 +10,8 @@ import yaml
 from omegaconf import MISSING, OmegaConf
 
 AGENT_MODES = ("compete", "cooperate")
+AGENT_INSTRUCTIONS = ("minimal", "full")
+AGENT_LOOPS = ("agentic", "oneshot")
 
 
 @dataclass
@@ -254,6 +256,15 @@ class AgentConfig:
     # "cooperate": agents can also message each other with `coral msg`; unread
     # messages are delivered with the recipient's next eval result.
     mode: str = "compete"
+    # "minimal": a short CORAL.md and short heartbeat prompts (task, how to eval,
+    # where shared state lives). "full": the original long-form guide with
+    # roles, research workflow and note-writing conventions.
+    instructions: str = "minimal"
+    # "agentic": each agent is a coding-agent CLI (agents.runtime) that edits,
+    # tests and evals with tools. "oneshot": each attempt is one model call
+    # that returns the whole program file, which is written and evaluated; see
+    # coral/agent/oneshot.py and agents.runtime_options for its settings.
+    loop: str = "agentic"
     stagger_seconds: int = 0  # delay between spawning each agent (rate-limit backpressure)
 
     # Reliability: crash-burst circuit breaker.
@@ -282,6 +293,12 @@ class AgentConfig:
             self.sandbox = SandboxConfig(**self.sandbox)
         if self.mode not in AGENT_MODES:
             raise ValueError(f"agents.mode must be one of {AGENT_MODES}, got {self.mode!r}")
+        if self.instructions not in AGENT_INSTRUCTIONS:
+            raise ValueError(
+                f"agents.instructions must be one of {AGENT_INSTRUCTIONS}, got {self.instructions!r}"
+            )
+        if self.loop not in AGENT_LOOPS:
+            raise ValueError(f"agents.loop must be one of {AGENT_LOOPS}, got {self.loop!r}")
         if self.sandbox.enabled and self.isolate_user:
             raise ValueError(
                 "agents.sandbox and agents.isolate_user are mutually exclusive — "

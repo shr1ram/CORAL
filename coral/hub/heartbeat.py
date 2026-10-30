@@ -40,6 +40,19 @@ DEFAULT_PROMPTS: dict[str, str] = {
     "lint_wiki": _load_prompt("lint_wiki"),
 }
 
+# Short prompts used with agents.instructions = "minimal" (the default).
+# An empty prompt means the action only delivers the eval result.
+MINIMAL_PROMPTS: dict[str, str] = {
+    name: _load_prompt(f"minimal/{name}") for name in DEFAULT_PROMPTS
+}
+
+
+def default_prompt(name: str, instructions: str = "minimal") -> str:
+    """Built-in prompt for a heartbeat action under the given instruction set."""
+    prompts = MINIMAL_PROMPTS if instructions == "minimal" else DEFAULT_PROMPTS
+    return prompts.get(name, "")
+
+
 # Which built-in actions default to global scope
 DEFAULT_GLOBAL: dict[str, bool] = {
     "reflect": False,
@@ -247,7 +260,8 @@ def default_local_actions(config) -> list[dict]:
                 {
                     "name": action_cfg.name,
                     "every": action_cfg.every,
-                    "prompt": action_cfg.prompt or DEFAULT_PROMPTS.get(action_cfg.name, ""),
+                    "prompt": action_cfg.prompt
+                    or default_prompt(action_cfg.name, config.agents.instructions),
                     "trigger": trigger,
                     "options": dict(getattr(action_cfg, "options", {}) or {}),
                 }
@@ -268,7 +282,8 @@ def default_global_actions(config) -> list[dict]:
                 {
                     "name": action_cfg.name,
                     "every": action_cfg.every,
-                    "prompt": action_cfg.prompt or DEFAULT_PROMPTS.get(action_cfg.name, ""),
+                    "prompt": action_cfg.prompt
+                    or default_prompt(action_cfg.name, config.agents.instructions),
                     "trigger": trigger,
                     "options": dict(getattr(action_cfg, "options", {}) or {}),
                 }

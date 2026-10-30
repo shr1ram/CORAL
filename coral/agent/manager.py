@@ -25,6 +25,7 @@ from coral.agent.assignments import (
     partition_into_islands,
     resolve_agent_specs,
 )
+from coral.agent.builtin.oneshot import OneShotRuntime
 from coral.agent.exit_classifier import (
     classify_by_uptime,
 )
@@ -59,10 +60,10 @@ from coral.hub.attempts import (
 )
 from coral.hub.auto_stop import write_auto_stop
 from coral.hub.heartbeat import (
-    DEFAULT_PROMPTS,
     DEFAULT_TRIGGER,
     default_global_actions,
     default_local_actions,
+    default_prompt,
     read_agent_heartbeat,
     read_global_heartbeat,
     write_agent_heartbeat,
@@ -117,8 +118,13 @@ class AgentManager:
         self.specs_by_id: dict[str, AgentSpec] = {s.agent_id: s for s in self.specs}
         # One runtime instance per agent_id. In uniform mode all entries point
         # to the same class; in mix-and-match mode each agent uses its own.
+        # agents.loop = "oneshot" replaces the coding-agent CLI with the
+        # one-shot worker for every agent.
         self.runtimes: dict[str, AgentRuntime] = {
-            s.agent_id: get_runtime(s.runtime) for s in self.specs
+            s.agent_id: OneShotRuntime()
+            if config.agents.loop == "oneshot"
+            else get_runtime(s.runtime)
+            for s in self.specs
         }
         # Default runtime used for run-level operations that aren't tied to a
         # specific agent (warmstart fallback prompts, validating resumed
@@ -1430,7 +1436,9 @@ class AgentManager:
 
         heartbeat_actions = []
         for ad in local_actions:
-            prompt_template = ad.get("prompt") or DEFAULT_PROMPTS.get(ad["name"], "")
+            prompt_template = ad.get("prompt") or default_prompt(
+                ad["name"], self.config.agents.instructions
+            )
             prompt = (
                 prompt_template.format(shared_dir=shared_dir, agent_id=agent_id)
                 if prompt_template
@@ -1448,7 +1456,9 @@ class AgentManager:
                 )
             )
         for ad in global_actions:
-            prompt_template = ad.get("prompt") or DEFAULT_PROMPTS.get(ad["name"], "")
+            prompt_template = ad.get("prompt") or default_prompt(
+                ad["name"], self.config.agents.instructions
+            )
             prompt = (
                 prompt_template.format(shared_dir=shared_dir, agent_id=agent_id)
                 if prompt_template

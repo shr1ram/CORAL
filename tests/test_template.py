@@ -14,7 +14,7 @@ def test_generate_coral_md_has_required_sections():
             tips="Profile first!",
         ),
         grader=GraderConfig(direction="minimize"),
-        agents=AgentConfig(count=2),
+        agents=AgentConfig(count=2, instructions="full"),
     )
 
     md = generate_coral_md(config, "agent-1")
@@ -82,7 +82,7 @@ def test_generate_coral_md_single_agent():
             tips="Be thorough.",
         ),
         grader=GraderConfig(),
-        agents=AgentConfig(count=1),
+        agents=AgentConfig(count=1, instructions="full"),
     )
 
     md = generate_coral_md(config, "agent-1", single_agent=True)
@@ -122,7 +122,7 @@ def test_generate_coral_md_tune_guardrails_present():
     config = CoralConfig(
         task=TaskConfig(name="t", description="d"),
         grader=GraderConfig(),
-        agents=AgentConfig(count=2),
+        agents=AgentConfig(count=2, instructions="full"),
     )
     md_multi = generate_coral_md(config, "agent-1")
     md_single = generate_coral_md(config, "agent-1", single_agent=True)

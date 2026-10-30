@@ -8,6 +8,7 @@ from coral.config import CoralConfig
 
 _TEMPLATE_PATH = Path(__file__).parent / "coral.md.template"
 _SINGLE_TEMPLATE_PATH = Path(__file__).parent / "coral_single.md.template"
+_MINIMAL_TEMPLATE_PATH = Path(__file__).parent / "coral_minimal.md.template"
 
 _COOPERATE_SECTION = """
 
@@ -51,9 +52,6 @@ def generate_coral_md(
         shared_dir: Name of the shared state directory (e.g. ".claude", ".codex", ".opencode")
         island_id: Agent's island in multi-island mode (formats a provenance hint)
     """
-    template_path = _SINGLE_TEMPLATE_PATH if single_agent else _TEMPLATE_PATH
-    template = template_path.read_text(encoding="utf-8")
-
     # Build optional sections
     tips_section = ""
     if config.task.tips:
@@ -61,6 +59,20 @@ def generate_coral_md(
 
     # Determine score direction from config or grader type
     score_direction = _get_score_direction(config)
+
+    if config.agents.instructions == "minimal":
+        rendered = _MINIMAL_TEMPLATE_PATH.read_text(encoding="utf-8").format(
+            task_name=config.task.name,
+            task_description=config.task.description.strip(),
+            tips_section=tips_section,
+            score_direction=score_direction,
+            agent_id=agent_id,
+            shared_dir=shared_dir,
+        )
+        return rendered + _team_sections(config, agent_id, single_agent, shared_dir, island_id)
+
+    template_path = _SINGLE_TEMPLATE_PATH if single_agent else _TEMPLATE_PATH
+    template = template_path.read_text(encoding="utf-8")
 
     # Research step is conditional
     research_enabled = config.agents.research
@@ -134,21 +146,30 @@ def generate_coral_md(
         repeat_research_hint=repeat_research_hint,
     )
 
-    # Multi-island provenance hint: append once at the end so the existing
-    # template stays untouched. Only when there's actually more than one island.
+    return rendered + _team_sections(config, agent_id, single_agent, shared_dir, island_id)
+
+
+def _team_sections(
+    config: CoralConfig,
+    agent_id: str,
+    single_agent: bool,
+    shared_dir: str,
+    island_id: str | int | None,
+) -> str:
+    """Sections appended to either template: island provenance and messaging."""
+    out = ""
+    # Multi-island provenance hint: only when there's more than one island.
     if island_id is not None and config.islands.count > 1:
-        rendered += (
+        out += (
             "\n\n## Multi-island provenance\n\n"
             f"You are working on island `{island_id}` in a multi-island run "
             f"({config.islands.count} islands total). Other islands exist with "
             "their own attempts, notes, and skills, but you cannot see their "
             "state directly. Each island evolves independently.\n"
         )
-
     if config.agents.mode == "cooperate" and not single_agent:
-        rendered += _COOPERATE_SECTION.format(agent_id=agent_id, shared_dir=shared_dir)
-
-    return rendered
+        out += _COOPERATE_SECTION.format(agent_id=agent_id, shared_dir=shared_dir)
+    return out
 
 
 def _get_score_direction(config: CoralConfig) -> str:
