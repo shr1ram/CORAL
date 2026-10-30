@@ -68,6 +68,13 @@ def generate_coral_md(
             score_direction=score_direction,
             agent_id=agent_id,
             shared_dir=shared_dir,
+            research_line=(
+                " Before your first implementation and when changing direction, research the "
+                f"problem with the `deep-research` skill; track coverage in "
+                f"`{shared_dir}/notes/research/_coverage.md`."
+                if config.agents.research
+                else ""
+            ),
         )
         return rendered + _team_sections(config, agent_id, single_agent, shared_dir, island_id)
 

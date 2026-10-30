@@ -26,18 +26,33 @@ def test_minimal_instructions_are_the_default_and_short():
     full = generate_coral_md(_config(instructions="full"), "alpha", shared_dir=".pi")
 
     assert AgentConfig().instructions == "minimal"
-    assert len(md) < len(full) / 5
+    assert len(md) < len(full) / 3
+    # Every function of the full guide is still covered, briefly.
     for needed in (
         "Fishing",
         "Catch mackerel.",
         "Stop at 1.8 s.",
-        "coral eval",
         "`alpha`",
-        ".pi/notes",
+        "Never run git yourself",
+        "No user is watching",
+        "Operation not permitted",
+        "structural attempt 1/3",
+        "local basin",
+        ".pi/roles/alpha.md",
+        "Lane",
+        "Posture",
+        ".pi/notes/focus/focus-alpha-",
+        "coral log --search",
+        "coral eval --tune",
+        "create-notes",
+        "skill-creator",
+        "librarian",
+        "coral heartbeat",
     ):
-        assert needed in md
-    assert "Operation not permitted" in md
-    assert "Don't run git yourself" in md
+        assert needed in md, needed
+    # The research step follows agents.research (on by default).
+    assert "deep-research` skill;" in md
+    assert "deep-research` skill;" not in generate_coral_md(_config(research=False), "alpha")
 
 
 def test_minimal_instructions_keep_messaging_section_in_cooperate_mode():
@@ -46,7 +61,8 @@ def test_minimal_instructions_keep_messaging_section_in_cooperate_mode():
 
 
 def test_heartbeat_prompts_follow_instruction_set():
-    assert len(default_prompt("reflect")) < len(DEFAULT_PROMPTS["reflect"]) / 3
+    for name in ("reflect", "pivot", "consolidate"):
+        assert len(default_prompt(name)) < len(DEFAULT_PROMPTS[name]) / 2.5, name
     assert default_prompt("reflect", "full") == DEFAULT_PROMPTS["reflect"]
 
     config = _config(heartbeat=[HeartbeatActionConfig(name="reflect", every=1)])
