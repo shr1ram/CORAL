@@ -37,6 +37,7 @@ def test_minimal_instructions_are_the_default_and_short():
     ):
         assert needed in md
     assert "Operation not permitted" in md
+    assert "Don't run git yourself" in md
 
 
 def test_minimal_instructions_keep_messaging_section_in_cooperate_mode():

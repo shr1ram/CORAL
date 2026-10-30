@@ -26,3 +26,6 @@ Get a first valid score within your first few steps, then improve from there.
 - You can only access your current directory and `{shared_dir}/`. "Operation not permitted"
   anywhere else is expected; don't explore outside.
 - Don't edit the grader or anything in `{shared_dir}/` except notes.
+- Don't run git yourself: use `coral eval`, `coral checkout`, `coral revert` and `coral diff`.
+  Committing `{shared_dir}/` or `.coral/` breaks evaluation.
+- You are fully autonomous: don't ask for permission or wait for instructions.
