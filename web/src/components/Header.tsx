@@ -82,8 +82,15 @@ export default function Header({ activeTab, onTabChange }: Props) {
                 : "stopped"}
             </span>
             {latest && (
-              <span title={latest.error ?? `${latest.active}/${latest.slots} slots generating`}>
-                {latest.error ? "model offline" : `${Math.round(latest.tok_s)} tok/s`}
+              <span
+                title={
+                  latest.error ??
+                  `${latest.active}/${latest.slots} slots busy, ${latest.reading ?? 0} reading prompts`
+                }
+              >
+                {latest.error
+                  ? "model offline"
+                  : `${Math.round(latest.tok_s)} gen · ${Math.round(latest.prompt_tok_s ?? 0)} prompt tok/s`}
               </span>
             )}
             <span>{status.total_attempts} att</span>

@@ -510,8 +510,12 @@ function ThroughputChart({
   const grid = theme === "dark" ? "#292d2f" : "#d0d3d5";
   const line = theme === "dark" ? "#eceeec" : "#1a1d1e";
   const tick = { font: { family: "'JetBrains Mono', monospace", size: 10 }, color: muted };
+  const prompt = theme === "dark" ? "#d4a72c" : "#9a6700";
   const recent = samples.slice(-30); // ~1 minute at the 2 s sampling rate
-  const avg = recent.length ? recent.reduce((a, x) => a + x.tok_s, 0) / recent.length : 0;
+  const mean = (f: (x: InferenceSample) => number) =>
+    recent.length ? recent.reduce((a, x) => a + f(x), 0) / recent.length : 0;
+  const genAvg = mean((x) => x.tok_s);
+  const promptAvg = mean((x) => x.prompt_tok_s ?? 0);
   const total = samples.reduce((a, x, i) => (i ? a + x.tok_s * (x.t - samples[i - 1].t) : a), 0);
 
   return (
@@ -519,8 +523,9 @@ function ThroughputChart({
       <div className="flex items-baseline justify-between mb-1">
         <p className="font-mono text-[10px] tracking-widest uppercase text-muted-fg">Generation throughput</p>
         <p className="font-mono text-[11px] text-muted-fg">
-          <span className="text-foreground">{Math.round(avg)} tok/s</span> (1 min avg) ·{" "}
-          {(total / 1000).toFixed(0)}k tokens
+          1 min avg: <span style={{ color: line }}>{Math.round(genAvg)} generating</span> ·{" "}
+          <span style={{ color: prompt }}>{Math.round(promptAvg)} reading prompts</span> tok/s ·{" "}
+          {(total / 1000).toFixed(0)}k generated
         </p>
       </div>
       <div className="h-[calc(100%-1.25rem)]">
@@ -528,12 +533,22 @@ function ThroughputChart({
           data={{
             datasets: [
               {
-                label: "tok/s",
+                label: "generating tok/s",
                 data: samples.map((x) => ({ x: x.t * 1000, y: x.tok_s })),
                 borderColor: line,
                 backgroundColor: line,
                 pointRadius: 0,
                 borderWidth: 1.2,
+                yAxisID: "y",
+              },
+              {
+                label: "reading prompts tok/s",
+                data: samples.map((x) => ({ x: x.t * 1000, y: x.prompt_tok_s ?? 0 })),
+                borderColor: prompt,
+                backgroundColor: prompt,
+                pointRadius: 0,
+                borderWidth: 1,
+                yAxisID: "y1",
               },
             ],
           }}
@@ -550,7 +565,13 @@ function ThroughputChart({
                 grid: { color: grid },
                 ticks: tick,
               },
-              y: { beginAtZero: true, grid: { color: grid }, ticks: tick },
+              y: { beginAtZero: true, grid: { color: grid }, ticks: { ...tick, color: line } },
+              y1: {
+                beginAtZero: true,
+                position: "right",
+                grid: { display: false },
+                ticks: { ...tick, color: prompt },
+              },
             },
             plugins: { legend: { display: false } },
           }}

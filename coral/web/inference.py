@@ -1,8 +1,10 @@
 """Sample generation throughput from a llama.cpp server for the dashboard.
 
-llama-server's ``/slots`` endpoint reports, for each slot that is generating,
-its task id and how many tokens it has decoded so far. Summing the growth of
-those counters between polls gives the server's total output tokens/s.
+llama-server's ``/slots`` endpoint reports, for each busy slot, its task id,
+how many prompt tokens it has read and how many tokens it has decoded so far.
+Summing the growth of those counters between polls gives the server's total
+generation tokens/s and prompt-reading tokens/s. A slot re-reading a long
+prompt after a cache miss shows up as prompt tokens/s, not as idle time.
 Samples are appended to ``<coral_dir>/inference.jsonl`` (outside ``public/``,
 so agents never see it) so replays of a run can show throughput later.
 """
@@ -19,24 +21,33 @@ from typing import Any
 SAMPLES_FILE = "inference.jsonl"
 
 
-def slot_progress(slots: list[dict[str, Any]]) -> dict[int, tuple[int, int]]:
-    """Map slot id → (task id, tokens decoded) for slots that are generating."""
+def slot_progress(slots: list[dict[str, Any]]) -> dict[int, tuple[int, int, int]]:
+    """Map slot id → (task id, prompt tokens read, tokens decoded) for busy slots."""
     progress = {}
     for slot in slots:
         if not slot.get("is_processing"):
             continue
         decoded = sum(t.get("n_decoded", 0) for t in slot.get("next_token") or [])
-        progress[slot["id"]] = (slot.get("id_task", -1), decoded)
+        read = slot.get("n_prompt_tokens_processed", 0)
+        progress[slot["id"]] = (slot.get("id_task", -1), read, decoded)
     return progress
 
 
-def decoded_since(before: dict[int, tuple[int, int]], after: dict[int, tuple[int, int]]) -> int:
-    """Tokens generated between two polls. A slot on a new task counts from zero."""
-    total = 0
-    for slot, (task, decoded) in after.items():
-        prev_task, prev_decoded = before.get(slot, (None, 0))
-        total += decoded - prev_decoded if prev_task == task else decoded
-    return max(total, 0)
+def tokens_since(
+    before: dict[int, tuple[int, int, int]], after: dict[int, tuple[int, int, int]]
+) -> tuple[int, int]:
+    """(prompt tokens read, tokens generated) between two polls.
+
+    A slot on a new task counts from zero.
+    """
+    read = generated = 0
+    for slot, (task, now_read, now_decoded) in after.items():
+        prev_task, prev_read, prev_decoded = before.get(slot, (None, 0, 0))
+        if prev_task != task:
+            prev_read = prev_decoded = 0
+        read += max(now_read - prev_read, 0)
+        generated += max(now_decoded - prev_decoded, 0)
+    return read, generated
 
 
 def manager_alive(coral_dir: Path) -> bool:
@@ -82,7 +93,7 @@ class InferenceSampler:
 
     async def run(self) -> None:
         self._running = True
-        before: dict[int, tuple[int, int]] | None = None
+        before: dict[int, tuple[int, int, int]] | None = None
         last_t = time.time()
         while self._running:
             await asyncio.sleep(self.interval)
@@ -95,10 +106,13 @@ class InferenceSampler:
             now = time.time()
             after = slot_progress(slots)
             if before is not None:
+                read, generated = tokens_since(before, after)
                 sample = {
                     "t": now,
-                    "tok_s": round(decoded_since(before, after) / (now - last_t), 1),
+                    "tok_s": round(generated / (now - last_t), 1),
+                    "prompt_tok_s": round(read / (now - last_t), 1),
                     "active": len(after),
+                    "reading": sum(1 for _, _, decoded in after.values() if decoded == 0),
                     "slots": len(slots),
                 }
                 self.latest = sample

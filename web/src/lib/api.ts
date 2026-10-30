@@ -312,8 +312,10 @@ export interface TeamResponse {
 
 export interface InferenceSample {
   t: number;
-  tok_s: number;
+  tok_s: number; // generated tokens/s
+  prompt_tok_s?: number; // prompt tokens read/s (absent in older samples)
   active: number;
+  reading?: number; // busy slots still reading their prompt
   slots: number;
 }
 
