@@ -322,3 +322,22 @@ def test_manager_sends_no_heartbeats_to_oneshot_agents(tmp_path, monkeypatch):
     mgr.monitor_loop(check_interval=0)
 
     assert interrupted == []
+
+
+def test_prompt_reports_undelivered_messages():
+    prompt = oneshot.build_prompt(
+        task="t",
+        context_files={},
+        target="s.cpp",
+        language="cpp",
+        program="",
+        program_note="",
+        recent=[],
+        messages=[],
+        direction="d",
+        cooperate=True,
+        agent_id="alpha",
+        teammates=["alpha", "beta"],
+        undelivered=["- `MESSAGE alpha: hi` -> you can't message yourself."],
+    )
+    assert "NOT delivered" in prompt and "you can't message yourself" in prompt

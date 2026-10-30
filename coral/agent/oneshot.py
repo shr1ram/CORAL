@@ -100,6 +100,7 @@ def build_prompt(
     program_note: str,
     recent: list[str],
     messages: list[str],
+    undelivered: list[str] | None = None,
     direction: str,
     cooperate: bool,
     agent_id: str,
@@ -113,6 +114,10 @@ def build_prompt(
         parts.append("## Recent attempts by the team (newest last)\n\n" + "\n".join(recent))
     if messages:
         parts.append("## Messages from other agents\n\n" + "\n".join(messages))
+    if undelivered:
+        parts.append(
+            "## Your messages that were NOT delivered last attempt\n\n" + "\n".join(undelivered)
+        )
     reply_format = (
         f"Reply with a first line `TITLE: <what you changed, in a few words>`, then the "
         f"complete new {target} in a single ```{language} block. The whole file is replaced "
@@ -243,6 +248,7 @@ def run(args: argparse.Namespace) -> None:
         if (worktree / name).exists()
     }
     injected = _injected_messages(args.prompt or "")
+    undelivered: list[str] = []
 
     _emit({"type": "session", "id": uuid.uuid4().hex})
     while True:
@@ -291,6 +297,7 @@ def run(args: argparse.Namespace) -> None:
             program_note=note,
             recent=recent,
             messages=messages,
+            undelivered=undelivered,
             direction=choose_direction(own_scores, agent_id, direction_name == "minimize"),
             cooperate=cooperate,
             agent_id=agent_id,
@@ -320,12 +327,15 @@ def run(args: argparse.Namespace) -> None:
                 },
             }
         )
+        undelivered = []  # shown in the next prompt so the agent can fix the format
         if cooperate:
             for to, body in outgoing:
                 sent = _coral("msg", to, body)
-                _tool_result(
-                    f"coral msg {to}", (sent.stdout + sent.stderr).strip(), sent.returncode != 0
-                )
+                output = (sent.stdout + sent.stderr).strip()
+                _tool_result(f"coral msg {to}", output, sent.returncode != 0)
+                if sent.returncode != 0:
+                    reason = output.removeprefix("Error: ").splitlines()[0] if output else "failed"
+                    undelivered.append(f"- `MESSAGE {to}: {body[:100]}` -> {reason}")
         if not program_new or not program_new.strip():
             _tool_result("write", "No fenced code block in the reply; nothing to evaluate.", True)
             continue
