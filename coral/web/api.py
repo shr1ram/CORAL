@@ -233,6 +233,22 @@ async def get_team(request: Request) -> JSONResponse:
     return JSONResponse(team_view(_coral_dir(request)))
 
 
+async def get_inference(request: Request) -> JSONResponse:
+    """GET /api/inference — inference server tokens/s: latest sample and the run's history."""
+    from coral.web.inference import manager_alive, read_samples
+
+    coral_dir = _coral_dir(request)
+    sampler = getattr(request.app.state, "inference", None)
+    latest = sampler.latest if sampler is not None and manager_alive(coral_dir) else None
+    return JSONResponse(
+        {
+            "enabled": sampler is not None,
+            "latest": latest,
+            "samples": read_samples(coral_dir),
+        }
+    )
+
+
 async def get_skills(request: Request) -> JSONResponse:
     """GET /api/skills — return all skills."""
     from coral.hub.skills import list_skills

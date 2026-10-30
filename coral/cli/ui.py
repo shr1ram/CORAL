@@ -251,10 +251,18 @@ def cmd_ui(args: argparse.Namespace) -> None:
 
     results_dir = coral_dir.resolve().parent.parent.parent
     catalog_root = find_catalog_root(Path.cwd(), results_dir)
-    app = create_app(coral_dir, results_dir=results_dir, catalog_root=catalog_root)
+    inference_url = getattr(args, "inference_url", None) or os.environ.get("CORAL_INFERENCE_URL")
+    app = create_app(
+        coral_dir,
+        results_dir=results_dir,
+        catalog_root=catalog_root,
+        inference_url=inference_url,
+    )
     url = f"http://{args.host}:{port}"
     print(f"CORAL Dashboard: {url}")
     print(f"Serving data from: {coral_dir}")
+    if inference_url:
+        print(f"Sampling tokens/s from: {inference_url}")
 
     # Write process metadata so `coral stop` can kill us and callers can
     # reconnect to an already-running detached dashboard.

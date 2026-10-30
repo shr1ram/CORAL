@@ -15,9 +15,11 @@ import {
   type InteractionKind,
   type MemoryKind,
   type TeamInteraction,
+  type InferenceSample,
   type TeamResponse,
 } from "../lib/api";
 import { useSSE } from "../hooks/useSSE";
+import { useInference } from "../hooks/useInference";
 import { useTheme, type Theme } from "../hooks/useTheme";
 import { agentColor } from "../lib/agentColors";
 
@@ -72,6 +74,7 @@ export default function Team() {
   const [selection, setSelection] = useState<Selection>(null);
   const [feed, setFeed] = useState<"messages" | "all">("messages");
 
+  const inference = useInference(5000);
   const refresh = () => api.team().then(setData).catch(() => {});
   useEffect(() => {
     refresh();
@@ -155,6 +158,14 @@ export default function Team() {
           onSpeed={setSpeed}
         />
         <MemoryChart memory={visible.memory} t0={t0} t1={t1} theme={theme} />
+        {inference && inference.samples.length > 0 && (
+          <ThroughputChart
+            samples={inference.samples.filter((x) => x.t <= at)}
+            t0={t0}
+            t1={t1}
+            theme={theme}
+          />
+        )}
       </div>
       <Feed
         data={data}
@@ -475,6 +486,73 @@ function MemoryChart({
             plugins: {
               legend: { position: "top", align: "end", labels: { boxWidth: 10, font: tick.font, color: muted } },
             },
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------- throughput -- */
+
+function ThroughputChart({
+  samples,
+  t0,
+  t1,
+  theme,
+}: {
+  samples: InferenceSample[];
+  t0: number;
+  t1: number;
+  theme: Theme;
+}) {
+  const muted = theme === "dark" ? "#a6acae" : "#727879";
+  const grid = theme === "dark" ? "#292d2f" : "#d0d3d5";
+  const line = theme === "dark" ? "#eceeec" : "#1a1d1e";
+  const tick = { font: { family: "'JetBrains Mono', monospace", size: 10 }, color: muted };
+  const recent = samples.slice(-30); // ~1 minute at the 2 s sampling rate
+  const avg = recent.length ? recent.reduce((a, x) => a + x.tok_s, 0) / recent.length : 0;
+  const total = samples.reduce((a, x, i) => (i ? a + x.tok_s * (x.t - samples[i - 1].t) : a), 0);
+
+  return (
+    <div className="h-36 shrink-0 border-t border-border px-4 pt-2 pb-3">
+      <div className="flex items-baseline justify-between mb-1">
+        <p className="font-mono text-[10px] tracking-widest uppercase text-muted-fg">Generation throughput</p>
+        <p className="font-mono text-[11px] text-muted-fg">
+          <span className="text-foreground">{Math.round(avg)} tok/s</span> (1 min avg) ·{" "}
+          {(total / 1000).toFixed(0)}k tokens
+        </p>
+      </div>
+      <div className="h-[calc(100%-1.25rem)]">
+        <Line
+          data={{
+            datasets: [
+              {
+                label: "tok/s",
+                data: samples.map((x) => ({ x: x.t * 1000, y: x.tok_s })),
+                borderColor: line,
+                backgroundColor: line,
+                pointRadius: 0,
+                borderWidth: 1.2,
+              },
+            ],
+          }}
+          options={{
+            animation: false,
+            maintainAspectRatio: false,
+            parsing: false,
+            scales: {
+              x: {
+                type: "time",
+                min: t0 * 1000,
+                max: t1 * 1000,
+                time: { displayFormats: { minute: "HH:mm", hour: "HH:mm" } },
+                grid: { color: grid },
+                ticks: tick,
+              },
+              y: { beginAtZero: true, grid: { color: grid }, ticks: tick },
+            },
+            plugins: { legend: { display: false } },
           }}
         />
       </div>

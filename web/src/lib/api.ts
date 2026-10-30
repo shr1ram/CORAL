@@ -310,6 +310,19 @@ export interface TeamResponse {
   messages: TeamMessage[];
 }
 
+export interface InferenceSample {
+  t: number;
+  tok_s: number;
+  active: number;
+  slots: number;
+}
+
+export interface InferenceResponse {
+  enabled: boolean;
+  latest: (InferenceSample & { error?: string }) | null;
+  samples: InferenceSample[];
+}
+
 /* API functions */
 
 export const api = {
@@ -325,6 +338,7 @@ export const api = {
   notes: () => get<Note[]>("/notes"),
   notesGraph: () => get<NotesGraphResponse>("/notes/graph"),
   team: () => get<TeamResponse>("/team"),
+  inference: () => get<InferenceResponse>("/inference"),
   skills: () => get<Skill[]>("/skills"),
   skill: (name: string) => get<SkillDetail>(`/skills/${name}`),
   logs: (agentId: string, signal?: AbortSignal) => get<LogData>(`/logs/${agentId}`, signal),

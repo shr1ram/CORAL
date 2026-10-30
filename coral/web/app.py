@@ -20,6 +20,7 @@ from coral.web.api import (
     get_attempts,
     get_config,
     get_dag,
+    get_inference,
     get_leaderboard,
     get_logs,
     get_logs_list,
@@ -35,12 +36,14 @@ from coral.web.api import (
     switch_run,
 )
 from coral.web.events import FileWatcher, sse_endpoint
+from coral.web.inference import InferenceSampler, manager_alive
 
 
 def create_app(
     coral_dir: Path,
     results_dir: Path | None = None,
     catalog_root: Path | None = None,
+    inference_url: str | None = None,
 ) -> Starlette:
     """Create the Starlette application.
 
@@ -50,6 +53,7 @@ def create_app(
                      If not provided, derived from coral_dir.
         catalog_root: Project directory within which other run catalogs may be
                       discovered. Defaults to the current results parent.
+        inference_url: Base URL of a llama.cpp server to sample tokens/s from.
     """
     coral_dir = Path(coral_dir).resolve()
     if results_dir is None:
@@ -70,9 +74,18 @@ def create_app(
         app.state._switch_lock = asyncio.Lock()
         app.state.watcher = FileWatcher(coral_dir)
         app.state._watcher_task = asyncio.create_task(app.state.watcher.run())
+        app.state.inference = None
+        if inference_url:
+            app.state.inference = InferenceSampler(
+                inference_url, lambda: app.state.coral_dir, manager_alive
+            )
+            app.state._inference_task = asyncio.create_task(app.state.inference.run())
         try:
             yield
         finally:
+            if app.state.inference is not None:
+                app.state.inference.stop()
+                app.state._inference_task.cancel()
             # shutdown
             app.state.watcher.stop()
             app.state._watcher_task.cancel()
@@ -99,6 +112,7 @@ def create_app(
         Route("/api/notes/graph", get_notes_graph),
         Route("/api/notes", get_notes),
         Route("/api/team", get_team),
+        Route("/api/inference", get_inference),
         Route("/api/skills", get_skills),
         Route("/api/skills/{name}", get_skill_detail),
         Route("/api/logs", get_logs_list),

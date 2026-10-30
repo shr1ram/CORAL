@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, type RunStatus } from "../lib/api";
 import { useSSE } from "../hooks/useSSE";
+import { useInference } from "../hooks/useInference";
 import RunSelector from "./RunSelector";
 import SettingsMenu from "./SettingsMenu";
 
@@ -32,6 +33,9 @@ export default function Header({ activeTab, onTabChange }: Props) {
     "attempt:update": refresh,
     "eval:update": refresh,
   });
+
+  const inference = useInference();
+  const latest = inference?.latest;
 
   const activeAgents = status?.agents.filter((a) => a.status === "active").length ?? 0;
 
@@ -77,6 +81,11 @@ export default function Header({ activeTab, onTabChange }: Props) {
                 ? "idle"
                 : "stopped"}
             </span>
+            {latest && (
+              <span title={latest.error ?? `${latest.active}/${latest.slots} slots generating`}>
+                {latest.error ? "model offline" : `${Math.round(latest.tok_s)} tok/s`}
+              </span>
+            )}
             <span>{status.total_attempts} att</span>
             {status.best_score != null && (
               <span>best {status.best_score.toFixed(4)}</span>
