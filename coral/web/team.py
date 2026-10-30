@@ -141,13 +141,30 @@ def team_view(coral_dir: str | Path) -> dict[str, Any]:
                 continue
             memory.append({"t": t, "kind": "skill", "agent": None, "label": skill.name})
 
+    # Team memory items written by the one-shot memory service.
+    from coral.hub.memory import read_items
+
+    for root in roots:
+        island = root.name if len(roots) > 1 else None
+        for item in read_items(coral_dir, island):
+            memory.append(
+                {
+                    "t": _epoch(item.get("created_at")),
+                    "kind": "memory",
+                    "agent": item.get("agent"),
+                    "label": f"{item.get('approach', '')}: {item.get('lesson', '')}"[:160],
+                }
+            )
+
     # Messages.
     messages = []
     for root in roots:
         island = root.name if len(roots) > 1 else None
         for m in list_messages(coral_dir, island_id=island):
             t = _epoch(m.created_at)
-            messages.append({"t": t, "id": m.id, "from": m.sender, "to": m.to, "body": m.body})
+            messages.append(
+                {"t": t, "id": m.id, "from": m.sender, "to": m.to, "body": m.body, "kind": m.kind}
+            )
             memory.append({"t": t, "kind": "message", "agent": m.sender, "label": m.body[:80]})
             agents.add(m.sender)
             recipients = sorted(agents - {m.sender}) if m.to == BROADCAST else [m.to]
@@ -158,7 +175,7 @@ def team_view(coral_dir: str | Path) -> dict[str, Any]:
                         "from": m.sender,
                         "to": to,
                         "kind": "broadcast" if m.to == BROADCAST else "message",
-                        "text": m.body,
+                        "text": m.body if m.kind == "message" else f"[{m.kind.upper()}] {m.body}",
                     }
                 )
 

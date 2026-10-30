@@ -265,6 +265,11 @@ class AgentConfig:
     # that returns the whole program file, which is written and evaluated; see
     # coral/agent/oneshot.py and agents.runtime_options for its settings.
     loop: str = "agentic"
+    # One-shot team memory (loop: oneshot): the manager writes a memory item per
+    # attempt, a state of play every memory_state_every items, and a librarian
+    # brief for each agent's next attempt; see coral/agent/memory_service.py.
+    memory: bool = True
+    memory_state_every: int = 8
     # Subagent mode: agents become managers that do no hands-on work and
     # delegate everything (coding, testing, research, notes) to Claude subagents
     # via `coral subagent`. The manager process runs `claude -p` outside the agent
@@ -316,6 +321,8 @@ class AgentConfig:
             )
         if self.loop not in AGENT_LOOPS:
             raise ValueError(f"agents.loop must be one of {AGENT_LOOPS}, got {self.loop!r}")
+        if self.memory_state_every < 1:
+            raise ValueError("agents.memory_state_every must be >= 1")
         if self.subagents and self.loop != "agentic":
             raise ValueError(
                 "agents.subagents needs agents.loop=agentic: a one-shot agent is a single "

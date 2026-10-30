@@ -4,8 +4,14 @@ Each attempt is a single model call with no tools: the prompt holds the task,
 the context files, the best program so far and the team's recent results, and
 the reply must contain the complete new program file. The worker writes that
 file, starts from the best attempt's commit (so lineage stays truthful), and
-runs `coral eval`. In cooperate mode the prompt also carries unread messages,
-and the reply can send messages with `MESSAGE <agent|all>: <text>` lines.
+runs `coral eval`.
+
+Replies may add `STATUS: ...` (what the agent is working on) and, with
+agents.memory, `RECALL: ...` (a question for the team memory); the prompt then
+carries the librarian's memory brief (coral/agent/memory_service.py). In
+cooperate mode the prompt also shows teammates' statuses, the last team
+messages grouped by type and open requests to this agent, and replies can send
+typed messages: `FINDING|WARNING|REQUEST|REPLY <agent|all>: <text>`.
 
 Runs as a subprocess in the agent's worktree (see builtin/oneshot.py) and logs
 Pi-format JSON events to stdout so the dashboard parses it like a Pi agent.
@@ -21,6 +27,7 @@ import sys
 import time
 import urllib.request
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +68,13 @@ def choose_direction(own_scores: list[float | None], agent_id: str, minimize: bo
 
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _TITLE_RE = re.compile(r"^\s*TITLE:\s*(.+)$", re.MULTILINE)
-_MESSAGE_RE = re.compile(r"^\s*MESSAGE\s+([\w.-]+)\s*:\s*(.+)$", re.MULTILINE)
+_STATUS_RE = re.compile(r"^\s*STATUS:\s*(.+)$", re.MULTILINE)
+_RECALL_RE = re.compile(r"^\s*RECALL:\s*(.+)$", re.MULTILINE)
+# Typed messages: "<TYPE> <recipient>: <text>"
+MESSAGE_TYPES = ("FINDING", "WARNING", "REQUEST", "REPLY")
+_MESSAGE_RE = re.compile(
+    r"^\s*(" + "|".join(MESSAGE_TYPES) + r")\s+([\w.-]+)\s*:\s*(.+)$", re.MULTILINE
+)
 
 
 def _now_ms() -> int:
@@ -79,15 +92,31 @@ def _coral(*args: str) -> subprocess.CompletedProcess:
     )
 
 
-def parse_reply(text: str) -> tuple[str | None, str, list[tuple[str, str]]]:
-    """(program from the last fenced block, title, messages) from a model reply."""
+@dataclass
+class Reply:
+    program: str | None
+    title: str
+    status: str | None = None
+    recall: str | None = None
+    messages: list[tuple[str, str, str]] = field(default_factory=list)  # (kind, to, body)
+
+
+def parse_reply(text: str) -> Reply:
+    """Program (last fenced block), title, status, recall and typed messages from a reply."""
     blocks = _FENCE_RE.findall(text)
-    program = blocks[-1] if blocks else None
     outside = _FENCE_RE.sub("", text)
-    title_match = _TITLE_RE.search(outside)
-    title = title_match.group(1).strip()[:120] if title_match else "one-shot attempt"
-    messages = [(to, body.strip()) for to, body in _MESSAGE_RE.findall(outside)]
-    return program, title, messages
+
+    def first(regex: re.Pattern) -> str | None:
+        match = regex.search(outside)
+        return match.group(1).strip() if match else None
+
+    return Reply(
+        program=blocks[-1] if blocks else None,
+        title=(first(_TITLE_RE) or "one-shot attempt")[:120],
+        status=first(_STATUS_RE),
+        recall=first(_RECALL_RE),
+        messages=[(k.lower(), to, body.strip()) for k, to, body in _MESSAGE_RE.findall(outside)],
+    )
 
 
 def build_prompt(
@@ -99,12 +128,16 @@ def build_prompt(
     program: str,
     program_note: str,
     recent: list[str],
-    messages: list[str],
-    undelivered: list[str] | None = None,
     direction: str,
     cooperate: bool,
     agent_id: str,
     teammates: list[str] | None = None,
+    board: list[str] | None = None,
+    history: dict[str, list[str]] | None = None,
+    requests: list[str] | None = None,
+    undelivered: list[str] | None = None,
+    brief: str | None = None,
+    memory: bool = False,
 ) -> str:
     parts = [task.strip()]
     for name, text in context_files.items():
@@ -112,25 +145,42 @@ def build_prompt(
     parts.append(f"## Current program ({target}): {program_note}\n\n```{language}\n{program}\n```")
     if recent:
         parts.append("## Recent attempts by the team (newest last)\n\n" + "\n".join(recent))
-    if messages:
-        parts.append("## Messages from other agents\n\n" + "\n".join(messages))
+    if brief:
+        parts.append("## Memory brief from the team librarian\n\n" + brief.strip())
+    if board:
+        parts.append("## What teammates are working on\n\n" + "\n".join(board))
+    if requests:
+        parts.append("## Open requests to you (answer with REPLY)\n\n" + "\n".join(requests))
+    for kind, lines in (history or {}).items():
+        if lines:
+            parts.append(f"## Recent {kind.lower()}s from the team\n\n" + "\n".join(lines))
     if undelivered:
         parts.append(
             "## Your messages that were NOT delivered last attempt\n\n" + "\n".join(undelivered)
         )
-    reply_format = (
-        f"Reply with a first line `TITLE: <what you changed, in a few words>`, then the "
-        f"complete new {target} in a single ```{language} block. The whole file is replaced "
-        "by your block, so include all of it."
-    )
+
+    lines = [
+        f"Reply with a first line `TITLE: <what you changed, in a few words>`, then the complete "
+        f"new {target} in a single ```{language} block. The whole file is replaced by your "
+        "block, so include all of it.",
+        "Outside the code block you may add:",
+        "- `STATUS: <what you are working on, one line>`"
+        + (" (teammates see it)" if cooperate else ""),
+    ]
+    if memory:
+        lines.append(
+            "- `RECALL: <a question for the team memory>`: the librarian answers it in your next "
+            "memory brief"
+        )
     if cooperate:
         others = [t for t in (teammates or []) if t != agent_id]
-        one = f" or `MESSAGE <name>: <text>` to one of: {', '.join(others)}" if others else ""
-        reply_format += (
-            " To tell teammates something useful (a finding, a warning, what you are trying), "
-            f"add lines `MESSAGE all: <text>` for the whole team{one}, outside the code block."
+        names = f"`all` or one of: {', '.join(others)}" if others else "`all`"
+        lines.append(
+            "- messages to teammates, one per line as `<TYPE> <recipient>: <text>`, where TYPE is "
+            "FINDING (something you learned), WARNING (a pitfall to avoid), REQUEST (ask a "
+            f"teammate for something) or REPLY (answer a request), and the recipient is {names}"
         )
-    parts.append(f"## Your task now\n\n{direction}\n\n{reply_format}")
+    parts.append(f"## Your task now\n\n{direction}\n\n" + "\n".join(lines))
     return "\n\n".join(parts)
 
 
@@ -217,27 +267,22 @@ def _tool_result(name: str, output: str, is_error: bool) -> None:
     )
 
 
-def _injected_messages(prompt: str) -> list[str]:
-    """Message lines from a prompt the manager injected (cooperate mode)."""
-    marker = "## Messages from other agents"
-    if marker not in prompt:
-        return []
-    section = prompt.split(marker, 1)[1].split("\n## ", 1)[0]
-    return [line for line in section.splitlines()[1:] if line.strip()]
-
-
 def run(args: argparse.Namespace) -> None:
     from coral.cli._helpers import find_coral_dir_and_island, read_agent_id, read_direction
     from coral.hub._island import island_root
     from coral.hub.attempts import get_leaderboard, read_attempts
-    from coral.hub.messages import format_messages, mark_read, read_unread
+    from coral.hub.memory import read_brief
+    from coral.hub.messages import open_requests, recent_for
+    from coral.hub.status import read_board, write_status
 
     worktree = Path.cwd()
     coral_dir, island_id = find_coral_dir_and_island()
     agent_id = read_agent_id()
     direction_name = read_direction(coral_dir)
     config = _read_yaml(coral_dir / "config.yaml")
-    cooperate = (config.get("agents") or {}).get("mode") == "cooperate"
+    agents_cfg = config.get("agents") or {}
+    cooperate = agents_cfg.get("mode") == "cooperate"
+    memory = bool(agents_cfg.get("memory", True))
     task = config.get("task") or {}
     task_text = f"# {task.get('name', '')}\n\n{task.get('description', '')}"
     if task.get("tips"):
@@ -247,7 +292,6 @@ def run(args: argparse.Namespace) -> None:
         for name in args.context
         if (worktree / name).exists()
     }
-    injected = _injected_messages(args.prompt or "")
     undelivered: list[str] = []
 
     _emit({"type": "session", "id": uuid.uuid4().hex})
@@ -280,13 +324,34 @@ def run(args: argparse.Namespace) -> None:
                 line += "\n  feedback: " + a.feedback.strip().replace("\n", "\n  ")[:1200]
             recent.append(line)
 
-        messages = list(injected)
-        injected = []
+        teammates = sorted(
+            p.stem for p in (island_root(coral_dir, island_id) / "roles").glob("*.md")
+        )
+        direction = choose_direction(own_scores, agent_id, direction_name == "minimize")
+        board, history, requests = [], {}, []
         if cooperate:
-            unread = read_unread(coral_dir, agent_id, island_id)
-            if unread:
-                messages += format_messages(unread).splitlines()
-                mark_read(coral_dir, agent_id, [m.id for m in unread], island_id)
+            best_of = {}
+            for a in team:
+                if a.score is not None:
+                    prev = best_of.get(a.agent_id)
+                    better = prev is None or (
+                        a.score < prev if direction_name == "minimize" else a.score > prev
+                    )
+                    best_of[a.agent_id] = a.score if better else prev
+            for other, record in read_board(coral_dir, island_id).items():
+                if other != agent_id:
+                    board.append(
+                        f"- {other} (best {best_of.get(other)}): {record.get('status') or '-'}"
+                    )
+            for m in recent_for(coral_dir, agent_id, 10, island_id):
+                who = "you" if m.sender == agent_id else m.sender
+                history.setdefault(m.kind, []).append(f"- {who} -> {m.to}: {m.body}")
+            requests = [
+                f"- {r.sender}: {r.body}" for r in open_requests(coral_dir, agent_id, island_id)
+            ][-5:]
+        brief = None
+        if memory:
+            brief = (read_brief(coral_dir, agent_id, island_id) or {}).get("text")
 
         prompt = build_prompt(
             task=task_text,
@@ -296,14 +361,16 @@ def run(args: argparse.Namespace) -> None:
             program=program,
             program_note=note,
             recent=recent,
-            messages=messages,
-            undelivered=undelivered,
-            direction=choose_direction(own_scores, agent_id, direction_name == "minimize"),
+            direction=direction,
             cooperate=cooperate,
             agent_id=agent_id,
-            teammates=sorted(
-                p.stem for p in (island_root(coral_dir, island_id) / "roles").glob("*.md")
-            ),
+            teammates=teammates,
+            board=board,
+            history=history,
+            requests=requests,
+            undelivered=undelivered,
+            brief=brief,
+            memory=memory,
         )
         _emit({"type": "turn_start"})
         try:
@@ -315,7 +382,7 @@ def run(args: argparse.Namespace) -> None:
             time.sleep(10)
             continue
 
-        program_new, title, outgoing = parse_reply(text)
+        reply = parse_reply(text)
         _emit(
             {
                 "type": "message_end",
@@ -327,20 +394,30 @@ def run(args: argparse.Namespace) -> None:
                 },
             }
         )
+        # Status (and any recall question) feed the board and the librarian.
+        write_status(
+            coral_dir,
+            agent_id,
+            status=reply.status,
+            direction=direction,
+            recall=reply.recall or "",
+            island_id=island_id,
+        )
         undelivered = []  # shown in the next prompt so the agent can fix the format
         if cooperate:
-            for to, body in outgoing:
-                sent = _coral("msg", to, body)
+            for kind, to, body in reply.messages:
+                sent = _coral("msg", "--type", kind, to, body)
                 output = (sent.stdout + sent.stderr).strip()
-                _tool_result(f"coral msg {to}", output, sent.returncode != 0)
+                _tool_result(f"coral msg {kind} {to}", output, sent.returncode != 0)
                 if sent.returncode != 0:
                     reason = output.removeprefix("Error: ").splitlines()[0] if output else "failed"
-                    undelivered.append(f"- `MESSAGE {to}: {body[:100]}` -> {reason}")
-        if not program_new or not program_new.strip():
+                    undelivered.append(f"- `{kind.upper()} {to}: {body[:100]}` -> {reason}")
+        if not reply.program or not reply.program.strip():
             _tool_result("write", "No fenced code block in the reply; nothing to evaluate.", True)
             continue
 
-        target_path.write_text(program_new, encoding="utf-8")
+        target_path.write_text(reply.program, encoding="utf-8")
+        title = reply.title
         _emit({"type": "tool_execution_start", "toolName": "coral eval"})
         result = _coral("eval", "-m", title)
         _tool_result("coral eval", (result.stdout + result.stderr).strip(), result.returncode != 0)

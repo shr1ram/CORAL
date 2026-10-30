@@ -499,6 +499,13 @@ Run 'coral <command> --help' for details on any command."""
     p_msg.add_argument(
         "--from", dest="sender", help="Sender name (default: this worktree's agent id)"
     )
+    p_msg.add_argument(
+        "--type",
+        dest="kind",
+        default="message",
+        choices=["message", "finding", "warning", "request", "reply"],
+        help="Message type (default: message)",
+    )
     _add_run_args(p_msg)
 
     p_inbox = sub.add_parser(

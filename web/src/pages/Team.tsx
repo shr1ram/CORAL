@@ -42,6 +42,7 @@ const MEMORY: Record<MemoryKind, { light: string; dark: string; label: string }>
   note: { light: "#9a6700", dark: "#d4a72c", label: "notes" },
   skill: { light: "#1a7f37", dark: "#57ab5a", label: "skills" },
   message: { light: "#1f6feb", dark: "#6cb6ff", label: "messages" },
+  memory: { light: "#8250df", dark: "#c297ff", label: "memory items" },
 };
 
 const VW = 640;

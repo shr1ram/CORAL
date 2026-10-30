@@ -273,7 +273,7 @@ export interface TaskConfig {
 }
 
 export type InteractionKind = "message" | "broadcast" | "built_on" | "note_ref";
-export type MemoryKind = "attempt" | "note" | "skill" | "message";
+export type MemoryKind = "attempt" | "note" | "skill" | "message" | "memory";
 
 export interface TeamInteraction {
   t: number;
@@ -298,6 +298,7 @@ export interface TeamMessage {
   from: string;
   to: string;
   body: string;
+  kind?: string;
 }
 
 export interface TeamResponse {

@@ -65,7 +65,14 @@ def cmd_msg(args: argparse.Namespace) -> None:
             print("Error: you can't message yourself.", file=sys.stderr)
             sys.exit(1)
     try:
-        message = send(coral_dir, sender, args.to, " ".join(args.body), island_id=island_id)
+        message = send(
+            coral_dir,
+            sender,
+            args.to,
+            " ".join(args.body),
+            island_id=island_id,
+            kind=getattr(args, "kind", "message") or "message",
+        )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

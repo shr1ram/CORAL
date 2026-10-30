@@ -76,26 +76,34 @@ def test_new_agent_settings_are_validated(field, value):
         AgentConfig(**{field: value})
 
 
-def test_parse_reply_takes_last_block_title_and_messages():
-    reply = (
+def test_parse_reply_takes_last_block_title_status_recall_and_typed_messages():
+    reply = oneshot.parse_reply(
         "TITLE: greedy merge of clusters\n"
+        "STATUS: merging mackerel clusters into one polygon\n"
+        "RECALL: what failed with multiple notches?\n"
         "```cpp\nold draft\n```\n"
         "Actually:\n```cpp\nint main() {}\n```\n"
-        "MESSAGE all: merging clusters beats single boxes\n"
-        "MESSAGE beta: your timer is off by 0.2s\n"
+        "FINDING all: merging clusters beats single boxes\n"
+        "WARNING beta: your timer is off by 0.2s\n"
+        "MESSAGE all: untyped lines are ignored\n"
     )
-    program, title, messages = oneshot.parse_reply(reply)
-
-    assert program == "int main() {}\n"
-    assert title == "greedy merge of clusters"
-    assert messages == [
-        ("all", "merging clusters beats single boxes"),
-        ("beta", "your timer is off by 0.2s"),
+    assert reply.program == "int main() {}\n"
+    assert reply.title == "greedy merge of clusters"
+    assert reply.status == "merging mackerel clusters into one polygon"
+    assert reply.recall == "what failed with multiple notches?"
+    assert reply.messages == [
+        ("finding", "all", "merging clusters beats single boxes"),
+        ("warning", "beta", "your timer is off by 0.2s"),
     ]
 
 
-def test_prompt_names_teammates_not_self():
-    prompt = oneshot.build_prompt(
+def test_parse_reply_without_code():
+    reply = oneshot.parse_reply("I think we should try annealing.")
+    assert reply.program is None and reply.title == "one-shot attempt" and reply.messages == []
+
+
+def _prompt(**overrides):
+    base = dict(
         task="t",
         context_files={},
         target="s.cpp",
@@ -103,19 +111,16 @@ def test_prompt_names_teammates_not_self():
         program="",
         program_note="",
         recent=[],
-        messages=[],
         direction="d",
-        cooperate=True,
+        cooperate=False,
         agent_id="alpha",
-        teammates=["alpha", "beta", "gamma"],
     )
-    assert "`MESSAGE all: <text>`" in prompt and "one of: beta, gamma" in prompt
-    assert "alpha" not in prompt
+    return oneshot.build_prompt(**{**base, **overrides})
 
 
-def test_parse_reply_without_code():
-    program, title, messages = oneshot.parse_reply("I think we should try annealing.")
-    assert program is None and title == "one-shot attempt" and messages == []
+def test_prompt_names_teammates_not_self():
+    prompt = _prompt(cooperate=True, teammates=["alpha", "beta", "gamma"])
+    assert "`all` or one of: beta, gamma" in prompt and "alpha" not in prompt
 
 
 def test_build_prompt_includes_context_program_and_cooperation():
@@ -127,34 +132,42 @@ def test_build_prompt_includes_context_program_and_cooperation():
         program="int main() {}",
         program_note="best so far",
         recent=["- beta: score 10 (improved): boxes"],
-        messages=["- From beta: try merging"],
         direction="Try a different algorithm.",
         cooperate=True,
         agent_id="alpha",
+        teammates=["alpha", "beta"],
+        board=["- beta (best 10): trying L-shapes"],
+        history={"finding": ["- beta -> all: notches help"]},
+        requests=["- beta: can you check the timer?"],
+        brief="- L-shapes beat rectangles by ~100 [abc12345, beta, 2133]",
+        memory=True,
     )
     for needed in (
         "Maximize a - b.",
         "```cpp\nint main() {}\n```",
         "beta: score 10",
-        "try merging",
+        "Memory brief from the team librarian",
+        "trying L-shapes",
+        "Open requests to you",
+        "Recent findings from the team",
         "Try a different algorithm.",
-        "MESSAGE",
+        "STATUS:",
+        "RECALL:",
+        "FINDING (something you learned)",
+        "one of: beta",
     ):
-        assert needed in prompt
-    solo = oneshot.build_prompt(
-        task="t",
-        context_files={},
-        target="s.cpp",
-        language="cpp",
-        program="",
-        program_note="",
-        recent=[],
-        messages=[],
-        direction="d",
-        cooperate=False,
-        agent_id="alpha",
+        assert needed in prompt, needed
+    solo = _prompt()
+    assert "FINDING" not in solo and "RECALL" not in solo and "STATUS:" in solo
+
+
+def test_prompt_reports_undelivered_messages():
+    prompt = _prompt(
+        cooperate=True,
+        teammates=["alpha", "beta"],
+        undelivered=["- `FINDING alpha: hi` -> you can't message yourself."],
     )
-    assert "MESSAGE" not in solo
+    assert "NOT delivered" in prompt and "you can't message yourself" in prompt
 
 
 def test_chat_stream_collects_reasoning_text_and_usage(capsys):
@@ -195,7 +208,7 @@ def test_chat_stream_collects_reasoning_text_and_usage(capsys):
         server.shutdown()
 
     assert reasoning == "think more"
-    assert oneshot.parse_reply(text)[0] == "int main(){}\n"
+    assert oneshot.parse_reply(text).program == "int main(){}\n"
     assert usage == {"input": 400, "output": 50, "cacheRead": 600, "cacheWrite": 0}
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert events[0]["type"] == "message_start"
@@ -322,22 +335,3 @@ def test_manager_sends_no_heartbeats_to_oneshot_agents(tmp_path, monkeypatch):
     mgr.monitor_loop(check_interval=0)
 
     assert interrupted == []
-
-
-def test_prompt_reports_undelivered_messages():
-    prompt = oneshot.build_prompt(
-        task="t",
-        context_files={},
-        target="s.cpp",
-        language="cpp",
-        program="",
-        program_note="",
-        recent=[],
-        messages=[],
-        direction="d",
-        cooperate=True,
-        agent_id="alpha",
-        teammates=["alpha", "beta"],
-        undelivered=["- `MESSAGE alpha: hi` -> you can't message yourself."],
-    )
-    assert "NOT delivered" in prompt and "you can't message yourself" in prompt

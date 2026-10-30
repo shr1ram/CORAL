@@ -173,6 +173,7 @@ class AgentManager:
         # in _start_sandbox_if_enabled; lives and dies with the manager.
         self._sandbox: Any | None = None
         self._subagent_broker: Any | None = None
+        self._memory_service: Any | None = None
         self._grader_proc: multiprocessing.Process | None = None
         self._grader_stop_event: Any | None = None  # multiprocessing.Event
         # Island migration. Only meaningful with >=2 islands and migration
@@ -244,6 +245,8 @@ class AgentManager:
 
         # 1b3. Subagent broker (agents.subagents): runs `claude -p` for agents.
         self._start_subagent_broker()
+        # 1b4. One-shot team memory (writer, librarian, state of play).
+        self._start_memory_service()
 
         # 1c. Start grader daemon. Agents' `coral eval` writes pending attempts;
         #     the daemon picks them up, grades inside an isolated worktree,
@@ -459,6 +462,28 @@ class AgentManager:
         logger.info(f"Sandbox provider {sb.provider!r} active")
         if self.verbose:
             print(f"[coral] Sandbox provider {sb.provider!r} active")
+
+    def _start_memory_service(self) -> None:
+        """Start the one-shot memory service (agents.loop=oneshot, agents.memory). Idempotent."""
+        agents = self.config.agents
+        if agents.loop != "oneshot" or not agents.memory or self._memory_service is not None:
+            return
+        from coral.agent.memory_service import MemoryService, chat_once
+
+        base_url = (agents.runtime_options or {}).get("base_url")
+        if not base_url:
+            logger.warning("agents.memory needs agents.runtime_options.base_url; memory is off")
+            return
+        model = str(agents.model).rsplit("/", 1)[-1]
+        islands = sorted({s.island_id for s in self.specs if s.island_id is not None}) or [None]
+        self._memory_service = MemoryService(
+            self.config,
+            self.paths.coral_dir,
+            self.paths.repo_dir,
+            islands,
+            llm=lambda prompt: chat_once(base_url, model, prompt),
+        )
+        self._memory_service.start()
 
     def _start_subagent_broker(self) -> None:
         """Start the subagent broker when agents.subagents is on. Idempotent."""
@@ -918,6 +943,7 @@ class AgentManager:
         # fresh launch specs reflecting its new state).
         self._start_sandbox_if_enabled()
         self._start_subagent_broker()
+        self._start_memory_service()
 
         # Start grader daemon (must be up before resumed agents submit evals).
         self._start_grader_daemon()
@@ -1140,6 +1166,9 @@ class AgentManager:
         if self._subagent_broker is not None:
             self._subagent_broker.stop()
             self._subagent_broker = None
+        if self._memory_service is not None:
+            self._memory_service.stop()
+            self._memory_service = None
         self._stop_sandbox()
         logger.info("All agents stopped.")
 
