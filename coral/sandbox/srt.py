@@ -34,6 +34,7 @@ prevents the agent from tampering with its own policy.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -70,9 +71,11 @@ class SrtSandbox:
     def __init__(self, cfg: SandboxConfig) -> None:
         self.cfg = cfg
         self._proxy: AllowAllProxy | None = None
+        self._internet = True
 
     def validate(self, agents: AgentConfig) -> None:
         ensure_sandbox_supported(agents)
+        self._internet = agents.internet
 
     def start(self) -> None:
         """Start the allow-all proxy backing ``network="open"``. Idempotent.
@@ -81,9 +84,10 @@ class SrtSandbox:
         filtering proxies per agent.
         """
         if self.cfg.network == "open" and self._proxy is None:
-            self._proxy = AllowAllProxy()
+            self._proxy = AllowAllProxy(allow_host=None if self._internet else is_loopback_host)
             port = self._proxy.start()
-            logger.info(f"Sandbox network proxy (allow-all) on 127.0.0.1:{port}")
+            policy = "allow-all" if self._internet else "loopback only, agents.internet=false"
+            logger.info(f"Sandbox network proxy ({policy}) on 127.0.0.1:{port}")
 
     def stop(self) -> None:
         if self._proxy is not None:
@@ -441,8 +445,26 @@ def srt_command_prefix(srt_command: list[str], settings_path: Path) -> list[str]
     return [*srt_command, "--settings", str(settings_path), "--"]
 
 
+def is_loopback_host(host: str) -> bool:
+    """True if every address ``host`` resolves to is loopback (127/8, ::1)."""
+    if host.lower() in ("localhost", "localhost.localdomain"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    return bool(infos) and all(ipaddress.ip_address(i[4][0]).is_loopback for i in infos)
+
+
 class AllowAllProxy:
     """Minimal allow-all HTTP forward proxy backing ``sandbox.network: open``.
+
+    With ``allow_host`` set, only destinations it accepts are dialed; the rest
+    get ``403 Forbidden`` (agents.internet = false allows loopback only).
 
     Handles CONNECT tunnels (all HTTPS/TLS traffic — git, pip, npm, model
     APIs) and single-request absolute-URI plain HTTP. Runs entirely in
@@ -453,8 +475,9 @@ class AllowAllProxy:
     _HEAD_LIMIT = 64 * 1024
     _CONNECT_TIMEOUT = 30.0
 
-    def __init__(self, host: str = "127.0.0.1") -> None:
+    def __init__(self, host: str = "127.0.0.1", allow_host=None) -> None:
         self._host = host
+        self._allow_host = allow_host
         self._listener: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
@@ -551,12 +574,17 @@ class AllowAllProxy:
 
     def _dial(self, authority: str, default_port: int) -> socket.socket:
         host, port = self._split_host_port(authority, default_port)
+        if self._allow_host is not None and not self._allow_host(host):
+            raise PermissionError(f"{host} is not allowed (agents.internet is off)")
         return socket.create_connection((host, port), timeout=self._CONNECT_TIMEOUT)
 
     def _tunnel(self, conn: socket.socket, target: str) -> None:
         """CONNECT: open a raw tunnel and relay bytes both ways."""
         try:
             upstream = self._dial(target, 443)
+        except PermissionError:
+            conn.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+            return
         except OSError:
             conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
             return
@@ -580,6 +608,9 @@ class AllowAllProxy:
         authority, slash, path = authority_and_path.partition("/")
         try:
             upstream = self._dial(authority, 80)
+        except PermissionError:
+            conn.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+            return
         except OSError:
             conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
             return

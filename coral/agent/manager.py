@@ -437,6 +437,12 @@ class AgentManager:
         an API session or warm a VM pool).
         """
         sb = self.config.agents.sandbox
+        agents = self.config.agents
+        if not sb.enabled and not agents.internet and agents.loop == "agentic":
+            raise RuntimeError(
+                "agents.internet is false, which needs agents.sandbox.enabled=true to "
+                "enforce for agentic agents. Enable the sandbox or set agents.internet=true."
+            )
         if not sb.enabled or self._sandbox is not None:
             return
 

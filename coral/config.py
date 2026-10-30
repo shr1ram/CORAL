@@ -269,6 +269,11 @@ class AgentConfig:
     # dir and mentioned in the instructions. Not implemented for this fork's
     # setup yet, so it must stay off.
     subagents: bool = False
+    # Internet access for agents. Off: sandboxed agentic agents can reach only
+    # loopback addresses (e.g. a local model server); everything else is
+    # refused. Needs agents.sandbox.enabled for agentic agents. One-shot
+    # agents have no tools, so this does not apply to them.
+    internet: bool = False
     stagger_seconds: int = 0  # delay between spawning each agent (rate-limit backpressure)
 
     # Reliability: crash-burst circuit breaker.

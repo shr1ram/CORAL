@@ -185,7 +185,7 @@ def test_resume_all_drains_continue_from_actions(tmp_path: Path, monkeypatch) ->
     cfg = CoralConfig.from_dict(
         {
             "task": {"name": "t", "description": "d"},
-            "agents": {"count": 1, "runtime": "claude-code"},
+            "agents": {"count": 1, "runtime": "claude-code", "internet": True},
         }
     )
     manager = AgentManager(cfg)
@@ -255,7 +255,7 @@ def test_resume_all_applies_cli_resume_from_like_queued_steering(
     cfg = CoralConfig.from_dict(
         {
             "task": {"name": "t", "description": "d"},
-            "agents": {"count": 1, "runtime": "claude-code"},
+            "agents": {"count": 1, "runtime": "claude-code", "internet": True},
         }
     )
     manager = AgentManager(cfg)
@@ -330,7 +330,7 @@ def test_resume_from_resets_real_worktree_head(tmp_path: Path, monkeypatch) -> N
     cfg = CoralConfig.from_dict(
         {
             "task": {"name": "t", "description": "d"},
-            "agents": {"count": 1, "runtime": "claude-code"},
+            "agents": {"count": 1, "runtime": "claude-code", "internet": True},
         }
     )
     manager = AgentManager(cfg)
@@ -395,7 +395,7 @@ def test_resume_from_archives_attempts_after_target(tmp_path: Path, monkeypatch)
     cfg = CoralConfig.from_dict(
         {
             "task": {"name": "t", "description": "d"},
-            "agents": {"count": 1, "runtime": "claude-code"},
+            "agents": {"count": 1, "runtime": "claude-code", "internet": True},
         }
     )
     manager = AgentManager(cfg)
@@ -460,7 +460,7 @@ def test_resume_from_resets_all_descendant_agent_worktrees(tmp_path: Path, monke
     cfg = CoralConfig.from_dict(
         {
             "task": {"name": "t", "description": "d"},
-            "agents": {"count": 3, "runtime": "claude-code"},
+            "agents": {"count": 3, "runtime": "claude-code", "internet": True},
         }
     )
     manager = AgentManager(cfg)
@@ -518,7 +518,7 @@ def test_resume_all_skips_orphan_dirs_without_agent_id_breadcrumb(
     cfg = CoralConfig.from_dict(
         {
             "task": {"name": "t", "description": "d"},
-            "agents": {"count": 2, "runtime": "claude-code"},
+            "agents": {"count": 2, "runtime": "claude-code", "internet": True},
             "islands": {"count": 2},
         }
     )

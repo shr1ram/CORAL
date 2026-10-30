@@ -42,6 +42,9 @@ agents:
   mode: compete        # compete | cooperate (agents can message each other)
   loop: agentic        # agentic (Pi with tools) | oneshot (one model call per attempt)
   instructions: minimal
+  internet: false      # sandboxed agents reach only localhost (the model server)
+  sandbox:
+    enabled: true
   runtime_options:     # used by loop: oneshot; Pi ignores them
     base_url: http://127.0.0.1:11501/v1
     target: solution.cpp

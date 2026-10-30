@@ -195,3 +195,53 @@ def test_instructions_and_heartbeats_do_not_mention_subagents(instructions):
     assert "librarian" not in md
     for name in ("reflect", "pivot", "consolidate", "lint_wiki"):
         assert "librarian" not in default_prompt(name, instructions), name
+
+
+def test_internet_is_off_by_default():
+    assert AgentConfig().internet is False
+
+
+def test_loopback_filter():
+    from coral.sandbox.srt import is_loopback_host
+
+    for host in ("127.0.0.1", "::1", "localhost", "127.0.0.2"):
+        assert is_loopback_host(host), host
+    for host in ("1.1.1.1", "2606:4700::1111", "example.invalid"):
+        assert not is_loopback_host(host), host
+
+
+def test_proxy_refuses_non_loopback_when_internet_is_off():
+    import socket
+
+    from coral.sandbox.srt import AllowAllProxy, is_loopback_host
+
+    target = socket.socket()
+    target.bind(("127.0.0.1", 0))
+    target.listen(1)
+    proxy = AllowAllProxy(allow_host=is_loopback_host)
+    port = proxy.start()
+
+    def connect(authority: str) -> bytes:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as c:
+            c.sendall(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode())
+            return c.recv(64)
+
+    try:
+        assert connect(f"127.0.0.1:{target.getsockname()[1]}").startswith(b"HTTP/1.1 200")
+        assert connect("1.1.1.1:443").startswith(b"HTTP/1.1 403")
+    finally:
+        proxy.stop()
+        target.close()
+
+
+def test_agentic_without_sandbox_and_internet_off_refuses_to_start(tmp_path):
+    from coral.agent.manager import AgentManager
+
+    cfg = CoralConfig.from_dict({"task": {"name": "t", "description": "d"}, "agents": {"count": 1}})
+    with pytest.raises(RuntimeError, match="agents.internet"):
+        AgentManager(cfg)._start_sandbox_if_enabled()
+
+    oneshot = CoralConfig.from_dict(
+        {"task": {"name": "t", "description": "d"}, "agents": {"count": 1, "loop": "oneshot"}}
+    )
+    AgentManager(oneshot)._start_sandbox_if_enabled()  # one-shot agents have no tools
