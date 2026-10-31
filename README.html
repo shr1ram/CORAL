@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CORAL Modes Guide</title>
+<style>
+  :root { --bg: #fdfcfa; --text: #1f2125; --muted: #6a707a; --line: #e6e3de; --code: #f3f1ed; --accent: #0b6e6e; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #16181b; --text: #e4e2dd; --muted: #9aa0a8; --line: #2c3035; --code: #22262a; --accent: #5cc3c0; }
+  }
+  :root[data-theme="dark"] { --bg: #16181b; --text: #e4e2dd; --muted: #9aa0a8; --line: #2c3035; --code: #22262a; --accent: #5cc3c0; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 17px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 48px 16px 96px; }
+  h1 { font-size: 1.9rem; margin: 0 0 8px; }
+  h2 { font-size: 1.25rem; margin: 48px 0 12px; }
+  .lead { color: var(--muted); margin: 0; }
+  code { font: 0.85em ui-monospace, Menlo, monospace; background: var(--code); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code); padding: 14px 16px; border-radius: 8px; overflow-x: auto; font: 0.85rem/1.55 ui-monospace, Menlo, monospace; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  td { padding: 9px 8px 9px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td:first-child { white-space: nowrap; padding-right: 16px; }
+  td.d { color: var(--muted); white-space: nowrap; padding-right: 16px; }
+  .scroll { overflow-x: auto; }
+  ul { padding-left: 20px; }
+  li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>CORAL coordination fork</h1>
+<p class="lead">Run teams of local Flint agents on ALE-Bench AHC039, and compare agents that compete with agents
+  that cooperate.</p>
+
+<h2>Start a run</h2>
+<pre><code>coral start -c examples/ale_bench_ahc039/task.yaml agents.mode=cooperate
+coral ui --inference-url http://127.0.0.1:11501     # dashboard: localhost:8420
+coral stop</code></pre>
+<p>Change any setting by adding <code>name=value</code> to <code>coral start</code>. The model server must be running
+  first (see below).</p>
+
+<h2>The three main choices</h2>
+<ul>
+  <li><b>Mode</b>: in <code>compete</code> mode, agents only see each other's attempts and notes. In
+    <code>cooperate</code> mode they can also send each other messages.</li>
+  <li><b>Loop</b>: in <code>agentic</code> mode, each agent is a coding agent that edits, tests and submits with
+    tools. In <code>oneshot</code> mode, each attempt is a single model call that writes the whole program.</li>
+  <li><b>Internet</b>: off by default. Agents can then only reach the local model server.</li>
+</ul>
+
+<h2>Other features</h2>
+<ul>
+  <li><b>Messages</b> (cooperate): five types: message, finding, warning, request and reply. Agents receive them
+    with their next result.</li>
+  <li><b>Status board</b> (one-shot): each agent posts a one-line status, so the team can see who's working on
+    what.</li>
+  <li><b>Team memory</b> (one-shot): a background helper records a lesson from every attempt. Before each attempt
+    it gives the agent a short brief of the most relevant lessons.</li>
+  <li><b>Subagents</b> (agentic, off by default): agents only plan, and hand the actual work to Claude subagents on
+    your subscription, with a spending cap.</li>
+  <li><b>Sandbox</b>: each agent can only read and write its own workspace and the shared team files.</li>
+  <li><b>Dashboard</b>: shows the team graph, each agent's live log and total tokens per second.</li>
+</ul>
+
+<h2>All settings</h2>
+<p>Values shown are those used by the AHC039 example.</p>
+<div class="scroll"><table>
+  <tr><td><code>agents.mode</code></td><td class="d">compete</td><td>compete or cooperate</td></tr>
+  <tr><td><code>agents.loop</code></td><td class="d">agentic</td><td>agentic or oneshot</td></tr>
+  <tr><td><code>agents.count</code></td><td class="d">4</td><td>number of agents</td></tr>
+  <tr><td><code>agents.internet</code></td><td class="d">false</td><td>give agents internet access</td></tr>
+  <tr><td><code>agents.sandbox.enabled</code></td><td class="d">true</td><td>sandbox agents (needed when internet is off)</td></tr>
+  <tr><td><code>agents.instructions</code></td><td class="d">minimal</td><td>minimal (short guide) or full (original long guide)</td></tr>
+  <tr><td><code>agents.research</code></td><td class="d">false</td><td>tell agents to research before coding</td></tr>
+  <tr><td><code>agents.memory</code></td><td class="d">true</td><td>team memory (one-shot only)</td></tr>
+  <tr><td><code>agents.memory_state_every</code></td><td class="d">8</td><td>how often memory writes a team summary</td></tr>
+  <tr><td><code>agents.subagents</code></td><td class="d">false</td><td>planner agents with Claude subagents (agentic only)</td></tr>
+  <tr><td><code>agents.subagent_max_running</code></td><td class="d">2</td><td>subagents each agent can run at once</td></tr>
+  <tr><td><code>agents.subagent_run_budget_usd</code></td><td class="d">20</td><td>spending cap for the whole run</td></tr>
+  <tr><td><code>agents.subagent_model</code></td><td class="d">sonnet</td><td>Claude model for subagents</td></tr>
+</table></div>
+<p>Everything else is standard CORAL; see <code>coral/config.py</code>.</p>
+
+<h2>Model server</h2>
+<p>Flint runs on the local llama.cpp build in <code>llama.cpp-flint</code>, with four slots, one per agent:</p>
+<pre><code>env -u DYLD_LIBRARY_PATH llama.cpp-flint/build/bin/llama-server \
+  -m flint-int4-q4_1.gguf --alias flint -ngl all -c 262144 -np 4 \
+  --cache-ram 6144 --cache-ram-mlock -b 2048 -ub 512 \
+  -fa on -ctk q8_0 -ctv q8_0 --jinja --port 11501</code></pre>
+<p>Benchmarks and the settings that were tried are in <code>notes.md</code>.</p>
+
+<h2>Comparing modes</h2>
+<pre><code>CONDITIONS="oneshot:compete oneshot:cooperate" REPEATS=3 MINUTES=45 experiments/compare_modes.sh</code></pre>
+<p>Runs each condition in turn with a fresh model server and alternates the order on every repeat. Results go to
+  <code>results/experiments/</code>.</p>
+
+</main>
+</body>
+</html>

@@ -251,7 +251,25 @@ def test_manager_appends_messages_to_heartbeat(tmp_path, monkeypatch):
 
     mgr.monitor_loop(check_interval=0)
 
-    assert "REFLECT" in delivered[0] and "grid init helps" in delivered[0]
+    prompt = delivered[0]
+    assert "REFLECT" in prompt and "grid init helps" in prompt
+    # Team messages come before the heartbeat so they are read.
+    assert prompt.index("From your team") < prompt.index("REFLECT")
+
+
+def test_manager_lists_older_open_requests_once(tmp_path, monkeypatch):
+    mgr, coral_dir, delivered = _manager_with_one_scored_attempt(
+        tmp_path, monkeypatch, "cooperate", heartbeat_every=100
+    )
+    send(coral_dir, "alpha", "beta", "can you profile the timer?", kind="request")
+    mark_read(coral_dir, "beta", [m.id for m in read_unread(coral_dir, "beta")])
+    send(coral_dir, "gamma", "beta", "new idea", kind="request")
+
+    mgr.monitor_loop(check_interval=0)
+
+    prompt = delivered[0]
+    assert prompt.count("new idea") == 1  # new, so not repeated under "still open"
+    assert "Still open, from earlier (1)" in prompt and "profile the timer" in prompt
 
 
 def test_manager_ignores_messages_in_compete_mode(tmp_path, monkeypatch):

@@ -49,25 +49,26 @@ _COOPERATE_SECTION = """
 
 ## Messaging other agents (cooperate mode)
 
-This run is in **cooperate** mode: besides the shared attempts, notes and skills,
-you can message the other agents directly. Your id is `{agent_id}`.
+This run is in **cooperate** mode: work as a team. Your id is `{agent_id}`.
 
 ```bash
-coral msg <agent-id> "text"   # message one agent (ids: see `coral log` or `{shared_dir}/roles/`)
-coral msg all "text"          # message every other agent
-coral inbox                   # read unread messages (they are also appended to your eval results)
-coral inbox --all             # full message history
+coral msg all "text" [--type T]        # message every other agent
+coral msg <agent-id> "text" [--type T] # message one agent (ids: `{shared_dir}/roles/`)
+coral inbox                            # unread messages (new ones also arrive with your eval results)
+coral inbox --all                      # full history
 ```
 
-Use messages for things that need to reach a specific agent soon:
-- **Claims:** "I'm taking X for the next few evals" so nobody duplicates it.
-- **Warnings:** "your commit abc123 fails on edge case Y".
-- **Requests and handoffs:** "can someone profile Z?", "I found a lead on W but I'm on V; who wants it?".
-- **Answers** to questions sent to you.
+Types: `message` (default), `finding`, `warning`, `request` (stays open until answered),
+`reply`.
 
-Keep each message short and actionable (under 2000 characters). Findings that everyone
-should keep belong in a note; send the note's path instead of repeating it. Don't send
-acknowledgements or small talk: every message costs the reader context and time.
+The rhythm:
+- **Orient:** read `coral inbox` and answer open requests first.
+- **Plan:** claim your idea: "taking X for the next few evals", so nobody duplicates it.
+- **Share:** write the note, then send one line that points to it: "L-shapes +90 on dense
+  inputs: see notes/experiments/l-shapes.md". Use `warning` for dead ends.
+- **Ask** when another agent's work could help: "can someone profile Z?".
+
+Keep messages to a line or two. The detail lives in the note.
 """
 
 
@@ -105,6 +106,7 @@ def generate_coral_md(
             agent_id=agent_id,
             shared_dir=shared_dir,
             research_line=_minimal_research_line(config, shared_dir),
+            **({} if single_agent else _minimal_team_steps(config, shared_dir)),
         )
         return rendered + _team_sections(config, agent_id, single_agent, shared_dir, island_id)
 
@@ -191,6 +193,24 @@ def generate_coral_md(
         repeat_research_hint=repeat_research_hint,
     )
     return rendered + _team_sections(config, agent_id, single_agent, shared_dir, island_id)
+
+
+def _minimal_team_steps(config: CoralConfig, shared_dir: str) -> dict[str, str]:
+    """Loop additions for cooperate mode: read the inbox, claim the idea, point teammates at notes."""
+    if config.agents.mode != "cooperate":
+        return {"orient_team": "", "plan_team": "", "share_team": ""}
+    return {
+        "orient_team": (
+            "\n   Read `coral inbox` and answer open requests "
+            '(`coral msg <agent> --type reply "..."`).'
+        ),
+        "plan_team": ' Claim it: `coral msg all "taking <idea> for the next few evals"`.',
+        "share_team": (
+            "\n   Then send the team one line that points to the note: "
+            '`coral msg all --type finding "<lesson in a few words>: see <note path>"` '
+            "(`--type warning` for a dead end)."
+        ),
+    }
 
 
 def _minimal_research_line(config: CoralConfig, shared_dir: str) -> str:

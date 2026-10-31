@@ -66,7 +66,7 @@ function SlotProgress({ slot }: { slot: LiveSlot }) {
 }
 
 /** Live view of the selected agent's in-flight model call. */
-export default function LivePanel({ live }: { live?: LiveAgent }) {
+export default function LivePanel({ live, showText = true }: { live?: LiveAgent; showText?: boolean }) {
   const streamRef = useRef<HTMLPreElement>(null);
   const text = (live?.entries ?? [])
     .map((e) => (e.type === "tool_call" ? `→ ${e.content}: ${e.details?.input ?? ""}` : e.content))
@@ -96,7 +96,7 @@ export default function LivePanel({ live }: { live?: LiveAgent }) {
         ) : null}
       </div>
       {live.slot && <SlotProgress slot={live.slot} />}
-      {live.state === "streaming" && text && (
+      {showText && live.state === "streaming" && text && (
         <pre
           ref={streamRef}
           className="font-mono text-[11px] leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto text-muted-fg"

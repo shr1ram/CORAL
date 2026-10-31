@@ -69,7 +69,7 @@ from coral.hub.heartbeat import (
     write_agent_heartbeat,
     write_global_heartbeat,
 )
-from coral.hub.messages import format_messages, mark_read, read_unread
+from coral.hub.messages import format_messages, mark_read, open_requests, read_unread
 from coral.hub.steering import ContinueFromAction, mark_applied, read_pending
 from coral.template.coral_md import generate_coral_md
 from coral.types import BUDGET_CLASS_REAL, Attempt, get_budget_class
@@ -1539,7 +1539,10 @@ class AgentManager:
         heartbeat_actions = []
         for ad in local_actions:
             prompt_template = ad.get("prompt") or default_prompt(
-                ad["name"], self.config.agents.instructions, self.config.agents.subagents
+                ad["name"],
+                self.config.agents.instructions,
+                self.config.agents.subagents,
+                self.config.agents.mode,
             )
             prompt = (
                 prompt_template.format(shared_dir=shared_dir, agent_id=agent_id)
@@ -1559,7 +1562,10 @@ class AgentManager:
             )
         for ad in global_actions:
             prompt_template = ad.get("prompt") or default_prompt(
-                ad["name"], self.config.agents.instructions, self.config.agents.subagents
+                ad["name"],
+                self.config.agents.instructions,
+                self.config.agents.subagents,
+                self.config.agents.mode,
             )
             prompt = (
                 prompt_template.format(shared_dir=shared_dir, agent_id=agent_id)
@@ -2534,13 +2540,25 @@ class AgentManager:
 
         prompts = ["\n".join(header_lines)]
         action_names = [a.name for a in actions]
-        prompts.extend(a.prompt for a in actions if a.prompt)
+        # Team messages come first, before any heartbeat, so they are read.
         if messages:
             action_names.append("messages")
-            prompts.append(
-                f"## Messages from other agents ({len(messages)} unread)\n\n"
-                + format_messages(messages)
-            )
+            team = f"## From your team ({len(messages)} new)\n\n" + format_messages(messages)
+            new_ids = {m.id for m in messages}
+            requests = [
+                r
+                for r in open_requests(
+                    self.paths.coral_dir, committing_agent_id, island_id=island_id
+                )
+                if r.id not in new_ids
+            ]
+            if requests:
+                team += (
+                    f"\n\nStill open, from earlier ({len(requests)}): answer with "
+                    '`coral msg <agent> --type reply "..."`.\n\n' + format_messages(requests)
+                )
+            prompts.append(team)
+        prompts.extend(a.prompt for a in actions if a.prompt)
 
         combined_prompt = "\n\n".join(prompts)
         names = ", ".join(action_names)

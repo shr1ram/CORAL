@@ -54,17 +54,29 @@ or contradictory ones, and regenerate {shared_dir}/notes/index.md"`. Then keep i
 """
 
 
-def default_prompt(name: str, instructions: str = "minimal", subagents: bool = False) -> str:
+_REFLECT_COOPERATE = """
+Then tell the team: send `coral msg all --type finding "<what you learned, in a line>: see <note
+path>"` (`--type warning` for a dead end), and answer any open requests to you first.
+"""
+
+
+def default_prompt(
+    name: str, instructions: str = "minimal", subagents: bool = False, mode: str = "compete"
+) -> str:
     """Built-in prompt for a heartbeat action under the given instruction set.
 
     lint_wiki never uses Claude Code's native subagent spawning: with
     agents.subagents it briefs a librarian via `coral subagent`, otherwise it
-    uses the organize-files skill.
+    uses the organize-files skill. In cooperate mode, reflect also asks the
+    agent to point its teammates at the note it just wrote.
     """
     if name == "lint_wiki":
         return _LINT_WITH_SUBAGENTS if subagents else MINIMAL_PROMPTS[name]
     prompts = MINIMAL_PROMPTS if instructions == "minimal" else DEFAULT_PROMPTS
-    return prompts.get(name, "")
+    prompt = prompts.get(name, "")
+    if name == "reflect" and mode == "cooperate" and prompt:
+        prompt = prompt.rstrip("\n") + "\n" + _REFLECT_COOPERATE
+    return prompt
 
 
 def run_default_prompt(coral_dir: Path | str, name: str) -> str:
@@ -82,7 +94,10 @@ def run_default_prompt(coral_dir: Path | str, name: str) -> str:
         config = {}
     agents = config.get("agents") or {}
     return default_prompt(
-        name, agents.get("instructions", "minimal"), bool(agents.get("subagents", False))
+        name,
+        agents.get("instructions", "minimal"),
+        bool(agents.get("subagents", False)),
+        agents.get("mode", "compete"),
     )
 
 
@@ -295,7 +310,10 @@ def default_local_actions(config) -> list[dict]:
                     "every": action_cfg.every,
                     "prompt": action_cfg.prompt
                     or default_prompt(
-                        action_cfg.name, config.agents.instructions, config.agents.subagents
+                        action_cfg.name,
+                        config.agents.instructions,
+                        config.agents.subagents,
+                        config.agents.mode,
                     ),
                     "trigger": trigger,
                     "options": dict(getattr(action_cfg, "options", {}) or {}),
@@ -319,7 +337,10 @@ def default_global_actions(config) -> list[dict]:
                     "every": action_cfg.every,
                     "prompt": action_cfg.prompt
                     or default_prompt(
-                        action_cfg.name, config.agents.instructions, config.agents.subagents
+                        action_cfg.name,
+                        config.agents.instructions,
+                        config.agents.subagents,
+                        config.agents.mode,
                     ),
                     "trigger": trigger,
                     "options": dict(getattr(action_cfg, "options", {}) or {}),

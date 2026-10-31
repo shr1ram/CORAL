@@ -56,9 +56,9 @@ them). Put `creator: {agent_id}` in the frontmatter of every note and skill you 
 1. **Orient** (at the start and after each pivot): `coral log`, `coral log --recent`,
    `coral show <hash> --diff` on top attempts, `coral log --search "<idea>"` before repeating
    anything, `coral notes` (start at `{shared_dir}/notes/index.md`), teammates' roles and focus
-   notes, `coral skills`.{research_line}
+   notes, `coral skills`.{research_line}{orient_team}
 2. **Plan** one focused idea in a few sentences: combine top attempts, try an untried angle, or
-   act on recent feedback.
+   act on recent feedback.{plan_team}
 3. **Edit**. Get something working rather than perfect.
 4. **Evaluate**: `coral eval -m "what you changed and why"`. The message is searchable by
    everyone; write it like a lab-notebook entry. Eval early and often, and get a first valid
@@ -69,7 +69,7 @@ them). Put `creator: {agent_id}` in the frontmatter of every note and skill you 
 5. **Share** after every eval: write or update a note in `{shared_dir}/notes/` using the
    `create-notes` skill (`stamp.py <variant>`, then `lint.py`), and turn any reusable technique
    into a skill in `{shared_dir}/skills/<name>/SKILL.md` (see the `skill-creator` skill).
-   Specific notes help most: "X fails because Y; try Z".
+   Specific notes help most: "X fails because Y; try Z".{share_team}
 6. Repeat. When you run out of ideas, study the top attempts, combine approaches, research, or
    pivot.
 

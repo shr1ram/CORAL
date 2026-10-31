@@ -193,3 +193,24 @@ def test_manager_section_offers_web_research_only_online():
     offline = _md(subagents=True)
     assert "(including web research)" in online
     assert "no web access" in offline and "(including web research)" not in offline
+
+
+def test_cooperate_mode_nudges_messaging():
+    from coral.config import AgentConfig, CoralConfig, TaskConfig
+    from coral.hub.heartbeat import default_prompt
+    from coral.template.coral_md import generate_coral_md
+
+    assert "coral msg all --type finding" in default_prompt("reflect", mode="cooperate")
+    assert "coral msg" not in default_prompt("reflect", mode="compete")
+    assert "coral msg" not in default_prompt("pivot", mode="cooperate")
+
+    def md(mode, single_agent=False):
+        cfg = CoralConfig(
+            task=TaskConfig(name="F", description="d"), agents=AgentConfig(count=4, mode=mode)
+        )
+        return generate_coral_md(cfg, "alpha", single_agent=single_agent, shared_dir=".pi")
+
+    loop = md("cooperate").split("## Loop")[1].split("## Reference")[0]
+    assert "coral inbox" in loop and "taking <idea>" in loop and "see <note path>" in loop
+    assert "coral msg" not in md("compete").split("## Loop")[1].split("## Reference")[0]
+    assert "coral msg" not in md("cooperate", single_agent=True)

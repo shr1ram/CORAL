@@ -18,7 +18,7 @@ export default function Logs() {
   const abortRef = useRef<AbortController | null>(null);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fetchInFlight = useRef(false);
-  const live = useLive();
+  const live = useLive(1000);
 
   // Track when user scrolls away from bottom
   useEffect(() => {
@@ -87,6 +87,14 @@ export default function Logs() {
       });
     }
   }, [logData, selectedAgent]);
+
+  const liveAgent = selectedAgent ? live?.agents[selectedAgent] : undefined;
+  const liveChars = (liveAgent?.entries ?? []).reduce((n, e) => n + (e.content?.length ?? 0), 0);
+  useEffect(() => {
+    if (!userHasScrolled.current && liveChars > 0) {
+      logPanelRef.current?.scrollTo({ top: logPanelRef.current.scrollHeight });
+    }
+  }, [liveChars]);
 
   useSSE({
     "log:update": () => {
@@ -231,8 +239,14 @@ export default function Logs() {
             )}
 
             {/* The in-flight model call comes after the last finished turn. */}
+            {liveAgent?.state === "streaming" && (liveAgent.entries?.length ?? 0) > 0 && (
+              <TurnCard
+                live
+                turn={{ index: logData.turns.length, entries: liveAgent.entries as LogEntry[], usage: {}, timestamp: liveAgent.since ?? "" }}
+              />
+            )}
             <div className="mt-4">
-              <LivePanel live={selectedAgent ? live?.agents[selectedAgent] : undefined} />
+              <LivePanel live={liveAgent} showText={false} />
             </div>
           </>
         )}
@@ -320,7 +334,7 @@ function SessionBlock({
   );
 }
 
-function TurnCard({ turn }: { turn: LogTurn }) {
+function TurnCard({ turn, live = false }: { turn: LogTurn; live?: boolean }) {
   const [expandThinking, setExpandThinking] = useState(true);
 
   return (
@@ -329,6 +343,11 @@ function TurnCard({ turn }: { turn: LogTurn }) {
         <span className="font-mono text-[11px] bg-foreground text-background px-1.5 py-0.5 rounded-md">
           T{turn.index + 1}
         </span>
+        {live && (
+          <span className="font-mono text-[10px] tracking-widest uppercase text-foreground animate-pulse">
+            live
+          </span>
+        )}
         {(turn.usage.output_tokens || turn.usage.input_tokens) && (
           <span className="font-mono text-[11px] text-muted-fg">
             {((turn.usage.input_tokens || 0) + (turn.usage.cache_read || 0) + (turn.usage.cache_creation || 0)).toLocaleString()} in · {(turn.usage.output_tokens || 0).toLocaleString()} out
@@ -350,7 +369,7 @@ function TurnCard({ turn }: { turn: LogTurn }) {
                 </button>
               </div>
               {expandThinking && (
-                <pre className="mt-1.5 font-mono text-[11px] text-muted-fg leading-relaxed whitespace-pre-wrap max-h-96 overflow-y-auto">
+                <pre className={`mt-1.5 font-mono text-[11px] text-muted-fg leading-relaxed whitespace-pre-wrap ${live ? "" : "max-h-96 overflow-y-auto"}`}>
                   {entry.content}
                 </pre>
               )}
