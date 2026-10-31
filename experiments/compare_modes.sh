@@ -34,8 +34,9 @@ stop_server() {
 
 start_server() {
     stop_server
+    # The patched build must load its own libraries, not Homebrew's.
     # shellcheck disable=SC2086
-    "$SERVER_BIN" -m "$MODEL_DIR/flint-int4-q4_1.gguf" $SERVER_FLAGS --host 127.0.0.1 --port $PORT \
+    env -u DYLD_LIBRARY_PATH "$SERVER_BIN" -m "$MODEL_DIR/flint-int4-q4_1.gguf" $SERVER_FLAGS --host 127.0.0.1 --port $PORT \
         > "$LOGS/server-$1.log" 2>&1 &
     for _ in $(seq 1 300); do
         curl -sf -m 2 "http://127.0.0.1:$PORT/health" >/dev/null && return 0
