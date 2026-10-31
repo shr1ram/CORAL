@@ -56,5 +56,16 @@ Everything combined (`opt/combined`, all switches plus `-ctxcp 6 --no-cache-idle
 --cache-ram-mlock`): agentic 126 vs 120, one-shot 206 vs 196, but per-agent agentic speed fell
 46 -> 39. The prefill switches trade per-agent speed for total, and the sigmoid fusion is slower.
 
-Next: rerun the build-up test on a powerful enough charger (round4.sh): base, GQA alone, "core"
-(GQA + amax + fused + noncontig), core + each prefill switch.
+Follow-up (2026-10-31 morning, battery, 3 interleaved runs each; `round5.jsonl`):
+
+| config | agentic total | per agent | wait mean / p95 | one-shot |
+|---|---|---|---|---|
+| base (`-b 2048 -ub 512`) | 127 [122-137] | 46.7 | 3.6 s / 8.5 s | 210 [199-228] |
+| GQA packing only | 126 [124-127] | 44.0 | 3.0 s / 7.5 s | 214 [212-218] |
+| core + shortest-first + `-ctxcp 6` | 132 [131-132] | 45.1 | 2.7 s / 6.1 s | 219 [210-226] |
+
+Verified in the real server: GQA packing engages on decode (G=8, q=2) and noncontig turns {0,2}
+decode steps into one ubatch. The overnight +10% for GQA packing was noise; the code changes are
+worth at most ~5% end to end, below this benchmark's ±10% run-to-run noise. The only confirmed win
+is `-b 2048 -ub 512`. To resolve small effects, use `llama-batched-bench` (fixed workload, ~1-2%
+noise) on mains power.
