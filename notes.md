@@ -16,9 +16,9 @@ Open issues and caveats for the `modes` branch (coordination study: Flint on ALE
 - **Late agents and request folders.** The srt sandbox blocks writes to other agents' subagent
   request folders only for agents known when the settings were built (roster plus worktrees on
   disk). A later agent gets protection on the next restart.
-- **The model server build.** `experiments/compare_modes.sh` starts the patched llama.cpp build
-  (`llama.cpp-flint`, commit 6358cf3, `--cache-ram-mlock` with the unlock-before-free fix) at the
-  start of every run.
+- **The model server.** `experiments/compare_modes.sh` starts `llama.cpp-flint` master (commit
+  6358cf3) at the start of every run with `-b 2048 -ub 512 --cache-ram 6144`, no RAM lock. The
+  `opt/*` branches (see below) are not used by default.
 
 ## llama-server tuning (2026-10-30/31)
 
