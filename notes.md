@@ -17,8 +17,9 @@ Open issues and caveats for the `modes` branch (coordination study: Flint on ALE
   request folders only for agents known when the settings were built (roster plus worktrees on
   disk). A later agent gets protection on the next restart.
 - **The model server.** `experiments/compare_modes.sh` starts `llama.cpp-flint` master (commit
-  6358cf3) at the start of every run with `-b 2048 -ub 512 --cache-ram 6144`, no RAM lock. The
-  `opt/*` branches (see below) are not used by default.
+  6358cf3) at the start of every run with `-b 2048 -ub 512 --cache-ram 6144 --cache-ram-mlock`. The
+  RAM lock keeps cached prompts out of swap; it only covers ~1.5 GB before the macOS wire limit,
+  then warns once and continues unlocked. The `opt/*` experiment branches were discarded.
 
 ## llama-server tuning (2026-10-30/31)
 
@@ -38,8 +39,8 @@ Settings (vs `-b 2048 -ub 512`, which beat the old `-b 256 -ub 128` by +26% agen
 - Much worse: `-kvu` (unified KV), -30% to -60%.
 - Rejected on quality: `LLAMA_ATTN_ROT_DISABLE=1` (KLD 0.25, top-1 agreement 89%).
 
-Code changes (llama.cpp-flint worktrees in `../llama-wt/`, branches `opt/*`, each behind an env var,
-all pass the quality check: KLD vs stock ~1e-6, top-1 agreement 99.98%):
+Code changes (discarded 2026-10-31; were llama.cpp-flint branches `opt/*`, each behind an env var,
+all passed the quality check: KLD vs stock ~1e-6, top-1 agreement 99.98%):
 
 | change | branch / switch | agentic total | per agent | one-shot |
 |---|---|---|---|---|

@@ -18,9 +18,10 @@ RESULTS="$CORAL_DIR/results/$TASK"
 LOGS=${LOGS:-$CORAL_DIR/results/experiments/$(date +%Y-%m-%d_%H%M%S)}
 MODEL_DIR=/Users/shriramruppa/Side/autoresearch/local-autoresearch/runs/flint-runtime
 SERVER_BIN=/Users/shriramruppa/Side/autoresearch/llama.cpp-flint/build/bin/llama-server
-# Tuned 2026-10-31 (see notes.md): -b 2048 -ub 512 is +26% agentic over -b 256 -ub 128; the prompt-cache
-# RAM lock and the opt/* code branches gave no measurable gain.
-SERVER_FLAGS=${SERVER_FLAGS:-"--alias flint -ngl all -c 262144 -np 4 --cont-batching --cache-ram 6144 -b 2048 -ub 512 -t 8 -fa on -ctk q8_0 -ctv q8_0 --jinja --temp 1 --top-p 0.95 --top-k 20 --min-p 0"}
+# Tuned 2026-10-31 (see notes.md): -b 2048 -ub 512 is +26% agentic over -b 256 -ub 128.
+# --cache-ram-mlock keeps cached prompts out of swap (safety, not speed; it can lock ~1.5 GB before the
+# macOS wire limit, then warns once and carries on unlocked).
+SERVER_FLAGS=${SERVER_FLAGS:-"--alias flint -ngl all -c 262144 -np 4 --cont-batching --cache-ram 6144 --cache-ram-mlock -b 2048 -ub 512 -t 8 -fa on -ctk q8_0 -ctv q8_0 --jinja --temp 1 --top-p 0.95 --top-k 20 --min-p 0"}
 PORT=11501
 mkdir -p "$LOGS"
 export DYLD_LIBRARY_PATH=/opt/homebrew/lib
